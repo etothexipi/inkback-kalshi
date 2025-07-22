@@ -26,8 +26,56 @@ fn sign_request(private_key_pem: &str, message: &str) -> Result<String> {
     Ok(general_purpose::STANDARD.encode(signature))
 }
 
-/// Fetch list of market tickers matching prefix
-pub async fn fetch_market_tickers(api_key: &str, private_key_path: &str, prefix: &str) -> Result<Vec<String>> {
+/// Check if a single market ticker exists
+async fn check_market_exists(api_key: &str, private_key_path: &str, ticker: &str) -> Result<bool> {
+    let client = Client::new();
+    let path = "/trade-api/v2/markets";
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    let message = format!("{}GET{}", timestamp, path);
+    let signature = sign_request(private_key_path, &message)?;
+
+    let url = format!("https://api.elections.kalshi.com{}?tickers={}", path, ticker);
+    
+    let resp = client
+        .get(&url)
+        .header("KALSHI-ACCESS-KEY", api_key)
+        .header("KALSHI-ACCESS-TIMESTAMP", timestamp.to_string())
+        .header("KALSHI-ACCESS-SIGNATURE", signature)
+        .send()
+        .await?;
+
+    let body: Value = resp.json().await?;
+    let markets = body
+        .get("markets")
+        .and_then(|v| v.as_array());
+    
+    Ok(markets.map_or(false, |m| !m.is_empty()))
+}
+
+/// Fetch list of market tickers - try exact ticker first, then prefix search
+pub async fn fetch_market_tickers(api_key: &str, private_key_path: &str, input: &str) -> Result<Vec<String>> {
+    // First, try treating the input as an exact ticker
+    println!("Checking if '{}' is an exact market ticker...", input);
+    
+    match check_market_exists(api_key, private_key_path, input).await {
+        Ok(true) => {
+            println!("Found exact market: {}", input);
+            return Ok(vec![input.to_string()]);
+        },
+        Ok(false) => {
+            println!("Market '{}' not found, falling back to prefix search...", input);
+        },
+        Err(e) => {
+            println!("Error checking exact market ({}), falling back to prefix search...", e);
+        }
+    }
+    
+    // Fallback to prefix search
+    fetch_markets_by_prefix(api_key, private_key_path, input).await
+}
+
+/// Fetch list of market tickers matching prefix (original logic)
+async fn fetch_markets_by_prefix(api_key: &str, private_key_path: &str, prefix: &str) -> Result<Vec<String>> {
     let client = Client::new();
     let mut all_tickers = Vec::new();
     let mut cursor: Option<String> = None;
@@ -106,10 +154,10 @@ pub async fn fetch_market_tickers(api_key: &str, private_key_path: &str, prefix:
 }
 
 /// Collect orderbook deltas and trades for tickers prefix and write to CSV files
-pub async fn collect_ws_data(api_key: &str, private_key_path: &str, prefix: &str, output_dir: &str) -> Result<()> {
-    let tickers = fetch_market_tickers(api_key, private_key_path, prefix).await?;
+pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input: &str, output_dir: &str) -> Result<()> {
+    let tickers = fetch_market_tickers(api_key, private_key_path, market_input).await?;
     if tickers.is_empty() {
-        return Err(anyhow!("no markets found with prefix {}", prefix));
+        return Err(anyhow!("no markets found for input '{}'", market_input));
     }
 
     // Create output directory if it doesn't exist

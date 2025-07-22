@@ -11,10 +11,10 @@ async fn main() -> Result<()> {
     let api_key = env::var("KALSHI_API_KEY")?;
     let private_key_file = env::var("KALSHI_PRIVATE_KEY_FILE")?;
     
-    let prefix = env::args().nth(1).ok_or_else(|| {
-        anyhow::anyhow!("Market prefix is required. Usage: kalshi_collector <MARKET_PREFIX>")
+    let market_input = env::args().nth(1).ok_or_else(|| {
+        anyhow::anyhow!("Market ticker or prefix is required. Usage: kalshi_collector <MARKET_TICKER_OR_PREFIX>")
     })?;
     
-    kalshi::collect_ws_data(&api_key, &private_key_file, &prefix, "src/data").await?;
+    kalshi::collect_ws_data(&api_key, &private_key_file, &market_input, "src/data").await?;
     Ok(())
 }
