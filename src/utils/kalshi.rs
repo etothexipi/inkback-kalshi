@@ -29,32 +29,78 @@ fn sign_request(private_key_pem: &str, message: &str) -> Result<String> {
 /// Fetch list of market tickers matching prefix
 pub async fn fetch_market_tickers(api_key: &str, private_key_path: &str, prefix: &str) -> Result<Vec<String>> {
     let client = Client::new();
-    let path = "/trade-api/v2/markets";
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let message = format!("{}GET{}", timestamp, path);
-    let signature = sign_request(private_key_path, &message)?;
+    let mut all_tickers = Vec::new();
+    let mut cursor: Option<String> = None;
+    
+    // Get current timestamp for filtering future markets
+    let current_ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    
+    loop {
+        let path = "/trade-api/v2/markets";
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+        let message = format!("{}GET{}", timestamp, path);
+        let signature = sign_request(private_key_path, &message)?;
 
-    let url = format!("https://api.elections.kalshi.com{}?limit=1000", path);
-    let resp = client
-        .get(&url)
-        .header("KALSHI-ACCESS-KEY", api_key)
-        .header("KALSHI-ACCESS-TIMESTAMP", timestamp.to_string())
-        .header("KALSHI-ACCESS-SIGNATURE", signature)
-        .send()
-        .await?;
+        // Build URL with query parameters
+        let mut url = format!("https://api.elections.kalshi.com{}?limit=1000&min_close_ts={}", path, current_ts);
+        if let Some(ref cursor_val) = cursor {
+            url.push_str(&format!("&cursor={}", cursor_val));
+        }
 
-    let body: Value = resp.json().await?;
-    let markets = body
-        .get("markets")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow!("unexpected response"))?;
+        println!("Fetching markets from: {}", url);
+        
+        let resp = client
+            .get(&url)
+            .header("KALSHI-ACCESS-KEY", api_key)
+            .header("KALSHI-ACCESS-TIMESTAMP", timestamp.to_string())
+            .header("KALSHI-ACCESS-SIGNATURE", signature)
+            .send()
+            .await?;
 
-    let tickers = markets
+        let body: Value = resp.json().await?;
+        let markets = body
+            .get("markets")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("unexpected response"))?;
+
+        println!("Fetched {} markets in this page", markets.len());
+        
+        // Extract tickers from this page
+        let page_tickers: Vec<String> = markets
+            .iter()
+            .filter_map(|m| m.get("ticker").and_then(|t| t.as_str()))
+            .map(|s| s.to_string())
+            .collect();
+        
+        all_tickers.extend(page_tickers);
+        
+        // Check if there's a next page
+        cursor = body.get("cursor").and_then(|c| c.as_str()).map(|s| s.to_string());
+        if cursor.is_none() || cursor.as_ref().unwrap().is_empty() {
+            break;
+        }
+        
+        println!("Found cursor for next page, continuing...");
+    }
+    
+    println!("Total markets fetched across all pages: {}", all_tickers.len());
+    println!("Sample of all tickers (first 10):");
+    for ticker in all_tickers.iter().take(10) {
+        println!("  {}", ticker);
+    }
+    
+    println!("Looking for markets with prefix: '{}'", prefix);
+    
+    let tickers: Vec<String> = all_tickers
         .iter()
-        .filter_map(|m| m.get("ticker").and_then(|t| t.as_str()))
         .filter(|t| t.starts_with(prefix))
         .map(|s| s.to_string())
         .collect();
+    
+    println!("Found {} markets matching prefix '{}'", tickers.len(), prefix);
+    for ticker in &tickers {
+        println!("  Matched: {}", ticker);
+    }
 
     Ok(tickers)
 }
