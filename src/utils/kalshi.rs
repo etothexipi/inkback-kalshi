@@ -5,7 +5,7 @@ use tokio_tungstenite::connect_async;
 use reqwest::Client;
 use serde_json::Value;
 use csv::Writer;
-use std::fs::File;
+use std::fs::{File, create_dir_all};
 use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose, Engine as _};
 use openssl::rsa::Rsa;
@@ -65,6 +65,9 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, prefix: &str
     if tickers.is_empty() {
         return Err(anyhow!("no markets found with prefix {}", prefix));
     }
+
+    // Create output directory if it doesn't exist
+    create_dir_all(output_dir)?;
 
     let path = "/trade-api/ws/v2";
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
