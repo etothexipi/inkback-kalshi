@@ -12,6 +12,7 @@ use openssl::rsa::Rsa;
 use openssl::hash::MessageDigest;
 use openssl::pkey::PKey;
 use openssl::sign::Signer;
+use chrono::{DateTime, Utc};
 
 /// Sign Kalshi API request using RSA PSS SHA256
 fn sign_request(private_key_pem: &str, message: &str) -> Result<String> {
@@ -177,12 +178,6 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input
     let (ws_stream, _) = connect_async(req).await?;
     let (mut write, mut read) = ws_stream.split();
 
-    // open csv writers
-    let mut orderbook_writer = Writer::from_writer(File::create(format!("{}/orderbook.csv", output_dir))?);
-    orderbook_writer.write_record(["client_ts","market_ticker","seq","price","delta","side","msg_type"])?;
-    let mut trade_writer = Writer::from_writer(File::create(format!("{}/trades.csv", output_dir))?);
-    trade_writer.write_record(["client_ts","server_ts","market_ticker","yes_price","no_price","count","taker_side"])?;
-
     let subscribe = serde_json::json!({
         "id":1,
         "cmd":"subscribe",
@@ -193,11 +188,36 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input
     });
     write.send(Message::Text(subscribe.to_string())).await?;
 
+    // Wait for first message to determine filename timestamp
+    let mut orderbook_writer: Option<Writer<File>> = None;
+    let mut trade_writer: Option<Writer<File>> = None;
+
     while let Some(msg) = read.next().await {
         let msg = msg?;
         if let Message::Text(text) = msg {
-            // Record client reception timestamp for every message
-            let client_timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+            // Record client reception timestamp in UTC for every message
+            let client_timestamp_utc = Utc::now();
+            let client_timestamp_millis = client_timestamp_utc.timestamp_millis() as u64;
+            
+            // Initialize CSV files on first message using the timestamp
+            if orderbook_writer.is_none() {
+                let date_suffix = client_timestamp_utc.format("%Y%m%d_%H%M%S").to_string();
+                
+                let orderbook_filename = format!("{}/orderbook_{}.csv", output_dir, date_suffix);
+                let trade_filename = format!("{}/trades_{}.csv", output_dir, date_suffix);
+                
+                println!("Creating CSV files:");
+                println!("  {}", orderbook_filename);
+                println!("  {}", trade_filename);
+                
+                let mut ob_writer = Writer::from_writer(File::create(&orderbook_filename)?);
+                ob_writer.write_record(["client_ts","market_ticker","seq","price","delta","side","msg_type"])?;
+                orderbook_writer = Some(ob_writer);
+                
+                let mut tr_writer = Writer::from_writer(File::create(&trade_filename)?);
+                tr_writer.write_record(["client_ts","server_ts","market_ticker","yes_price","no_price","count","taker_side"])?;
+                trade_writer = Some(tr_writer);
+            }
             
             let v: Value = serde_json::from_str(&text)?;
             if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
@@ -206,12 +226,14 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input
                         if let Some(seq) = v.get("seq").and_then(|x| x.as_i64()) {
                             if let Some(msg) = v.get("msg") {
                                 let ticker = msg.get("market_ticker").and_then(|x| x.as_str()).unwrap_or("");
+                                let ob_writer = orderbook_writer.as_mut().unwrap();
+                                
                                 if let Some(side_yes) = msg.get("yes").and_then(|x| x.as_array()) {
                                     for level in side_yes {
                                         if let Some(arr) = level.as_array() {
                                             if let (Some(price), Some(size)) = (arr.get(0).and_then(|x| x.as_i64()), arr.get(1).and_then(|x| x.as_i64())) {
-                                                orderbook_writer.write_record(&[
-                                                    client_timestamp.to_string(),
+                                                ob_writer.write_record(&[
+                                                    client_timestamp_millis.to_string(),
                                                     ticker.to_string(),
                                                     seq.to_string(),
                                                     price.to_string(),
@@ -226,8 +248,8 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input
                                     for level in side_no {
                                         if let Some(arr) = level.as_array() {
                                             if let (Some(price), Some(size)) = (arr.get(0).and_then(|x| x.as_i64()), arr.get(1).and_then(|x| x.as_i64())) {
-                                                orderbook_writer.write_record(&[
-                                                    client_timestamp.to_string(),
+                                                ob_writer.write_record(&[
+                                                    client_timestamp_millis.to_string(),
                                                     ticker.to_string(),
                                                     seq.to_string(),
                                                     price.to_string(),
@@ -238,7 +260,7 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input
                                         }
                                     }
                                 }
-                                orderbook_writer.flush()?;
+                                ob_writer.flush()?;
                             }
                         }
                     }
@@ -249,15 +271,17 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input
                                 let price = msg.get("price").and_then(|x| x.as_i64()).unwrap_or(0);
                                 let delta = msg.get("delta").and_then(|x| x.as_i64()).unwrap_or(0);
                                 let side = msg.get("side").and_then(|x| x.as_str()).unwrap_or("");
-                                orderbook_writer.write_record(&[
-                                    client_timestamp.to_string(),
+                                let ob_writer = orderbook_writer.as_mut().unwrap();
+                                
+                                ob_writer.write_record(&[
+                                    client_timestamp_millis.to_string(),
                                     ticker.to_string(),
                                     seq.to_string(),
                                     price.to_string(),
                                     delta.to_string(),
                                     side.to_string(),
                                     "delta".into()])?;
-                                orderbook_writer.flush()?;
+                                ob_writer.flush()?;
                             }
                         }
                     }
@@ -269,15 +293,17 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input
                             let count = msg.get("count").and_then(|x| x.as_i64()).unwrap_or(0);
                             let taker_side = msg.get("taker_side").and_then(|x| x.as_str()).unwrap_or("");
                             let server_ts = msg.get("ts").and_then(|x| x.as_i64()).unwrap_or(0);
-                            trade_writer.write_record(&[
-                                client_timestamp.to_string(),
+                            let tr_writer = trade_writer.as_mut().unwrap();
+                            
+                            tr_writer.write_record(&[
+                                client_timestamp_millis.to_string(),
                                 server_ts.to_string(), // Server timestamp from trade message
                                 ticker.to_string(),
                                 yes_price.to_string(),
                                 no_price.to_string(),
                                 count.to_string(),
                                 taker_side.to_string()])?;
-                            trade_writer.flush()?;
+                            tr_writer.flush()?;
                         }
                     }
                     _ => {}
