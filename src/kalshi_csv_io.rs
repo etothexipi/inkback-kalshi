@@ -52,43 +52,82 @@ impl<R: Read> Iterator for OrderbookIterator<R> {
 
 impl<R: Read> OrderbookIterator<R> {
     fn parse_orderbook_record(&self, record: &csv::StringRecord) -> Result<RawObRow> {
-        let seq = record.get(self.get_column_index("seq")?)
+        // Handle different column name formats
+        let seq_col = self.find_column(&["seq"])?;
+        let ts_col = self.find_column(&["client_ts", "ts"])?;
+        let ticker_col = self.find_column(&["ticker", "market_ticker"])?;
+        let msg_type_col = self.find_column(&["msg_type"])?;
+
+        let seq = record.get(seq_col)
             .ok_or_else(|| anyhow::anyhow!("Missing seq column"))?
             .parse::<u64>()?;
 
-        let ts = record.get(self.get_column_index("client_ts")?)
+        let ts = record.get(ts_col)
             .ok_or_else(|| anyhow::anyhow!("Missing client_ts column"))?
             .parse::<u64>()?;
 
-        let ticker = record.get(self.get_column_index("ticker")?)
+        let ticker = record.get(ticker_col)
             .ok_or_else(|| anyhow::anyhow!("Missing ticker column"))?
             .to_string();
 
-        let msg_type = record.get(self.get_column_index("msg_type")?)
+        let msg_type = record.get(msg_type_col)
             .ok_or_else(|| anyhow::anyhow!("Missing msg_type column"))?
             .to_string();
 
         let row = match msg_type.as_str() {
             "snapshot" => {
-                // Parse snapshot data - expecting yes_levels and no_levels as JSON or structured format
-                let yes_levels = self.parse_levels(record, "yes_levels")?;
-                let no_levels = self.parse_levels(record, "no_levels")?;
-                
-                RawObRow {
-                    seq,
-                    ts,
-                    ticker,
-                    msg_type,
-                    side: None,
-                    price: None,
-                    quantity: None,
-                    yes_levels: Some(yes_levels),
-                    no_levels: Some(no_levels),
+                // Check if we have aggregated levels (old format) or individual price/delta/side (new format)
+                if let Ok(_) = self.find_column(&["yes_levels"]) {
+                    // Old format with aggregated levels
+                    let yes_levels = self.parse_levels(record, "yes_levels")?;
+                    let no_levels = self.parse_levels(record, "no_levels")?;
+                    
+                    RawObRow {
+                        seq,
+                        ts,
+                        ticker,
+                        msg_type,
+                        side: None,
+                        price: None,
+                        quantity: None,
+                        yes_levels: Some(yes_levels),
+                        no_levels: Some(no_levels),
+                    }
+                } else {
+                    // New format with individual price/delta/side rows
+                    let side_str = record.get(self.find_column(&["side"])?)
+                        .ok_or_else(|| anyhow::anyhow!("Missing side column for snapshot"))?;
+                    
+                    let side = match side_str.to_lowercase().as_str() {
+                        "yes" => Side::Yes,
+                        "no" => Side::No,
+                        _ => return Err(anyhow::anyhow!("Invalid side: {}", side_str)),
+                    };
+
+                    let price = record.get(self.find_column(&["price"])?)
+                        .ok_or_else(|| anyhow::anyhow!("Missing price column for snapshot"))?
+                        .parse::<u8>()?;
+
+                    let quantity = record.get(self.find_column(&["delta", "quantity"])?)
+                        .ok_or_else(|| anyhow::anyhow!("Missing delta/quantity column for snapshot"))?
+                        .parse::<i64>()?;
+
+                    RawObRow {
+                        seq,
+                        ts,
+                        ticker,
+                        msg_type,
+                        side: Some(side),
+                        price: Some(price),
+                        quantity: Some(quantity),
+                        yes_levels: None,
+                        no_levels: None,
+                    }
                 }
             }
             "delta" => {
                 // Parse delta data
-                let side_str = record.get(self.get_column_index("side")?)
+                let side_str = record.get(self.find_column(&["side"])?)
                     .ok_or_else(|| anyhow::anyhow!("Missing side column for delta"))?;
                 
                 let side = match side_str.to_lowercase().as_str() {
@@ -97,12 +136,12 @@ impl<R: Read> OrderbookIterator<R> {
                     _ => return Err(anyhow::anyhow!("Invalid side: {}", side_str)),
                 };
 
-                let price = record.get(self.get_column_index("price")?)
+                let price = record.get(self.find_column(&["price"])?)
                     .ok_or_else(|| anyhow::anyhow!("Missing price column for delta"))?
                     .parse::<u8>()?;
 
-                let quantity = record.get(self.get_column_index("quantity")?)
-                    .ok_or_else(|| anyhow::anyhow!("Missing quantity column for delta"))?
+                let quantity = record.get(self.find_column(&["delta", "quantity"])?)
+                    .ok_or_else(|| anyhow::anyhow!("Missing delta/quantity column for delta"))?
                     .parse::<i64>()?;
 
                 RawObRow {
@@ -123,15 +162,15 @@ impl<R: Read> OrderbookIterator<R> {
         Ok(row)
     }
 
-    fn get_column_index(&self, column_name: &str) -> Result<usize> {
+    fn find_column(&self, column_names: &[&str]) -> Result<usize> {
         self.headers
             .iter()
-            .position(|h| h == column_name)
-            .ok_or_else(|| anyhow::anyhow!("Column '{}' not found", column_name))
+            .position(|h| column_names.contains(&h))
+            .ok_or_else(|| anyhow::anyhow!("Column '{}' not found", column_names.join(", ")))
     }
 
     fn parse_levels(&self, record: &csv::StringRecord, column_name: &str) -> Result<Vec<(u8, i64)>> {
-        let levels_str = record.get(self.get_column_index(column_name)?)
+        let levels_str = record.get(self.find_column(&[column_name])?)
             .ok_or_else(|| anyhow::anyhow!("Missing {} column", column_name))?;
 
         if levels_str.is_empty() {
@@ -210,32 +249,40 @@ impl<R: Read> Iterator for TradesIterator<R> {
 
 impl<R: Read> TradesIterator<R> {
     fn parse_trade_record(&self, record: &csv::StringRecord) -> Result<RawTradeRow> {
-        let seq = record.get(self.get_column_index("seq")?)
-            .ok_or_else(|| anyhow::anyhow!("Missing seq column"))?
-            .parse::<u64>()?;
+        // Handle both formats: with seq or without seq (use timestamp as seq)
+        let seq = if let Ok(seq_col) = self.find_column(&["seq"]) {
+            record.get(seq_col)
+                .ok_or_else(|| anyhow::anyhow!("Missing seq column"))?
+                .parse::<u64>()?
+        } else {
+            // Use client_ts as seq if no seq column
+            record.get(self.find_column(&["client_ts"])?)
+                .ok_or_else(|| anyhow::anyhow!("Missing client_ts column"))?
+                .parse::<u64>()?
+        };
 
-        let ts = record.get(self.get_column_index("client_ts")?)
+        let ts = record.get(self.find_column(&["client_ts"])?)
             .ok_or_else(|| anyhow::anyhow!("Missing client_ts column"))?
             .parse::<u64>()?;
 
-        let ticker = record.get(self.get_column_index("ticker")?)
+        let ticker = record.get(self.find_column(&["ticker", "market_ticker"])?)
             .ok_or_else(|| anyhow::anyhow!("Missing ticker column"))?
             .to_string();
 
-        let yes_price = record.get(self.get_column_index("yes_price")?)
+        let yes_price = record.get(self.find_column(&["yes_price"])?)
             .ok_or_else(|| anyhow::anyhow!("Missing yes_price column"))?
             .parse::<u8>()?;
 
-        let no_price = record.get(self.get_column_index("no_price")?)
+        let no_price = record.get(self.find_column(&["no_price"])?)
             .ok_or_else(|| anyhow::anyhow!("Missing no_price column"))?
             .parse::<u8>()?;
 
-        let qty = record.get(self.get_column_index("quantity")?)
-            .ok_or_else(|| anyhow::anyhow!("Missing quantity column"))?
+        let qty = record.get(self.find_column(&["quantity", "count"])?)
+            .ok_or_else(|| anyhow::anyhow!("Missing quantity/count column"))?
             .parse::<i64>()?;
 
-        let taker_str = record.get(self.get_column_index("taker")?)
-            .ok_or_else(|| anyhow::anyhow!("Missing taker column"))?;
+        let taker_str = record.get(self.find_column(&["taker", "taker_side"])?)
+            .ok_or_else(|| anyhow::anyhow!("Missing taker/taker_side column"))?;
 
         let taker = match taker_str.to_lowercase().as_str() {
             "yes" => Side::Yes,
@@ -254,11 +301,11 @@ impl<R: Read> TradesIterator<R> {
         })
     }
 
-    fn get_column_index(&self, column_name: &str) -> Result<usize> {
+    fn find_column(&self, column_names: &[&str]) -> Result<usize> {
         self.headers
             .iter()
-            .position(|h| h == column_name)
-            .ok_or_else(|| anyhow::anyhow!("Column '{}' not found", column_name))
+            .position(|h| column_names.contains(&h))
+            .ok_or_else(|| anyhow::anyhow!("Column '{}' not found", column_names.join(", ")))
     }
 }
 

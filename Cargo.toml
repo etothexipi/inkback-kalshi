@@ -25,6 +25,7 @@ rsa = "0.9"
 sha2 = "0.10"
 rand = "0.8"
 openssl = { version = "0.10" }
+clap = { version = "4.0", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3.8"

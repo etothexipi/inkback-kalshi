@@ -79,22 +79,7 @@ impl KalshiBacktest {
     }
 }
 
-/// Convenience function to run a simple backtest
-pub fn run_simple_backtest(
-    orderbook_path: &str,
-    trades_path: &str,
-    strategy: &mut dyn KalshiStrategy,
-    latency_ms: u64,
-) -> Result<Report> {
-    let config = SimConfig {
-        latency: std::time::Duration::from_millis(latency_ms),
-        start_time: 0,
-        end_time: None,
-    };
 
-    let backtest = KalshiBacktest::new(config);
-    backtest.run_from_files(orderbook_path, trades_path, strategy)
-}
 
 /// Calculate basic performance metrics from a report
 pub fn calculate_performance_metrics(report: &Report) -> PerformanceMetrics {
@@ -220,8 +205,14 @@ mod tests {
     }
 
     #[test]
-    fn test_run_simple_backtest() -> Result<()> {
+    fn test_backtest_with_config() -> Result<()> {
         let (orderbook_file, trades_file) = create_test_csv_files()?;
+
+        let config = SimConfig {
+            latency: Duration::from_millis(5),
+            start_time: 0,
+            end_time: None,
+        };
 
         let mut strategy = SpreadMmStrategy::new(SpreadMmParams {
             min_spread: 2,
@@ -230,11 +221,11 @@ mod tests {
             order_ttl: Duration::from_secs(5),
         });
 
-        let result = run_simple_backtest(
+        let backtest = KalshiBacktest::new(config);
+        let result = backtest.run_from_files(
             orderbook_file.path().to_str().unwrap(),
             trades_file.path().to_str().unwrap(),
             &mut strategy,
-            5, // 5ms latency
         )?;
 
         assert!(result.orders.len() > 0);
