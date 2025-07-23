@@ -223,28 +223,69 @@ impl Engine {
         ts: u64,
         strategy: &mut dyn KalshiStrategy,
     ) {
-        // Determine which side's orders can be filled
-        let (fill_price, fill_side) = match taker_side {
-            Side::Yes => (yes_price, Side::No), // YES taker fills NO orders
-            Side::No => (no_price, Side::Yes),  // NO taker fills YES orders
-        };
+        // Process fills for both sides based on the trade
+        match taker_side {
+            Side::Yes => {
+                // YES taker means someone bought YES at yes_price
+                // This can fill NO orders (sell YES) at or below yes_price
+                self.process_side_fills(Side::No, yes_price, &mut qty_remaining, ts, strategy, true);
+            }
+            Side::No => {
+                // NO taker means someone bought NO at no_price  
+                // This can fill YES orders (buy YES) at or above (100 - no_price)
+                let effective_yes_price = 100 - no_price;
+                self.process_side_fills(Side::Yes, effective_yes_price, &mut qty_remaining, ts, strategy, false);
+            }
+        }
+    }
 
+    fn process_side_fills(
+        &mut self,
+        fill_side: Side,
+        trade_price: u8,
+        qty_remaining: &mut i64,
+        ts: u64,
+        strategy: &mut dyn KalshiStrategy,
+        is_at_or_below: bool, // true for at-or-below, false for at-or-above
+    ) {
         // Find all active orders that can be filled
         let mut orders_to_fill: Vec<_> = self.state.active
             .iter()
-            .filter(|(_, order)| order.side == fill_side && order.price == fill_price)
+            .filter(|(_, order)| {
+                if order.side != fill_side {
+                    return false;
+                }
+                
+                // Check if order price allows for a fill at trade_price
+                if is_at_or_below {
+                    // For NO orders: fill if order price >= trade_price (selling at higher price is better)
+                    order.price >= trade_price
+                } else {
+                    // For YES orders: fill if order price <= trade_price (buying at lower price is better)
+                    order.price <= trade_price
+                }
+            })
             .map(|(&id, order)| (id, order.clone()))
             .collect();
 
-        // Sort by order ID for deterministic fills
-        orders_to_fill.sort_by_key(|(id, _)| *id);
+        // Sort by price priority (best prices first) and then by order ID for deterministic fills
+        if is_at_or_below {
+            // For NO orders, prioritize lower prices (better for the seller)
+            orders_to_fill.sort_by_key(|(id, order)| (order.price, *id));
+        } else {
+            // For YES orders, prioritize higher prices (better for the buyer) 
+            orders_to_fill.sort_by_key(|(id, order)| (std::cmp::Reverse(order.price), *id));
+        }
 
         for (order_id, mut order) in orders_to_fill {
-            if qty_remaining <= 0 {
+            if *qty_remaining <= 0 {
                 break;
             }
 
-            let fill_qty = qty_remaining.min(order.remaining);
+            let fill_qty = (*qty_remaining).min(order.remaining);
+            
+            // Fill at the order's limit price (price improvement for the order placer)
+            let fill_price = order.price;
             
             // Create fill
             let fill = Fill {
@@ -263,7 +304,7 @@ impl Engine {
 
             // Update order
             order.remaining -= fill_qty;
-            qty_remaining -= fill_qty;
+            *qty_remaining -= fill_qty;
 
             if order.remaining <= 0 {
                 // Order fully filled
