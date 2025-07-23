@@ -1,0 +1,158 @@
+High‑Level, Repo‑Agnostic Back‑test Specification
+(Design target: Rust ≥ 1.74, async‑runtime optional but recommended)
+
+1. Terminology & Core Assumptions
+Term	Meaning
+Snapshot row	msg_type == snapshot; gives full depth (§2.2).
+Delta row	msg_type == delta; single price‑level change.
+Trade row	Executed trade (from Trades CSV).
+Global seq	seq is monotone across all markets. Process events strictly in ascending seq then client_ts.
+YES / NO	Each MLB contract has two order books (YES, NO); treat them as one L2 book with bids = YES levels, asks = NO levels.
+Latency (ms)	Configurable delay between event‑arrival and our order hitting the book.
+Maker‑only	All strategy orders are passively resting; no fees.
+
+2. Modules & Public Interfaces
+rust
+Copy
+crate
+├── csv_io
+│   ├── parse_orderbook(path) -> impl Iterator<Item=RawObRow>
+│   └── parse_trades(path)     -> impl Iterator<Item=RawTradeRow>
+├── event_stream
+│   └── merge(obs, trades) -> impl Iterator<Item=Event>         // §3
+├── l2_book
+│   ├── OrderBook::apply_snapshot(...)
+│   ├── OrderBook::apply_delta(...)
+│   └── OrderBook::best_bid_ask() -> (u8, u8)                  // cents
+├── strategy
+│   └── trait Strategy { fn on_book(&mut self, md: &MarketData) -> Vec<OrderInstr>; fn on_fill(&mut self, fill: &Fill); }
+├── exec_sim
+│   └── Engine::run(cfg, strategy, events) -> Report           // §4–§6
+└── types.rs   // Event, MarketData, OrderInstr, ActiveOrder, Fill, Report
+3. Event Construction
+rust
+Copy
+enum Event {
+    Snapshot { seq: u64, ts: u64, ticker: String, yes_levels: Vec<(u8, i64)>, no_levels: Vec<(u8, i64)> },
+    Delta    { seq: u64, ts: u64, ticker: String, side: Side, price: u8, delta: i64 },
+    Trade    { seq: u64, ts: u64, ticker: String, yes_price: u8, no_price: u8, qty: i64, taker: Side },
+}
+Implementation rule:
+
+Parse both CSVs line‑by‑line.
+
+Group consecutive snapshot rows having identical (seq, ticker) into one Snapshot event.
+
+Convert trade rows 1‑for‑1 into Trade events.
+
+Heap‑merge the two iterators by (seq, ts) ascending to yield a unified stream.
+
+4. Execution Simulator (exec_sim::Engine)
+State:
+
+rust
+Copy
+struct SimState {
+    books: HashMap<String, OrderBook>,
+    pending: BinaryHeap<PendingOrder>,   // ordered by activation_time
+    active: HashMap<OrderId, ActiveOrder>,
+    latency: Duration,
+    metrics: Metrics,
+}
+Loop (for ev in events):
+
+Activate Orders
+
+rust
+Copy
+while let Some(p) = pending.peek() if p.activation_time <= ev.ts {
+    active.insert(p.id, p.into_active());
+}
+Apply Market Event
+
+Lookup OrderBook for ev.ticker; create on first sight.
+
+Snapshot → apply_snapshot; Delta → apply_delta.
+
+If Trade, record for debug and evaluate fills (step 4).
+
+Feed Strategy
+
+rust
+Copy
+let md = MarketData { ts: ev.ts, ticker: ev.ticker.clone(), bid, ask /* from book */ };
+for instr in strategy.on_book(&md) {
+    match instr {
+        OrderInstr::Limit { side, price, qty, ttl } => create_pending(side, price, qty, ttl),
+        OrderInstr::Cancel { id }                   => cancel_if_active(id),
+    }
+}
+Fill Logic (on Trade)
+For each ActiveOrder at trade.price opposite trade.taker:
+
+pgsql
+Copy
+fill_qty = min(order.remaining, trade.qty_left)
+generate Fill { id, price, qty=fill_qty, ts=ev.ts }
+if order.remaining == 0 => remove from active
+trade.qty_left -= fill_qty
+metrics.update(fill)
+strategy.on_fill(&fill)
+Stop when trade.qty_left == 0.
+
+Expire Orders
+After processing event, remove any ActiveOrder whose expiry_time <= ev.ts and notify strategy (treated as cancel).
+
+5. Strategy‑Side API
+rust
+Copy
+enum OrderInstr {
+    Limit  { side: Side, price: u8, qty: i64, ttl: Duration }, // ttl = order_expiration_secs
+    Cancel { id: OrderId },
+}
+A minimal spread‑capture strategy can live in strategy::spread_mm and be parameterised by:
+
+rust
+Copy
+struct Params {
+    min_spread: u8,       // cents
+    post_qty:    i64,
+    max_pos:     i64,
+    order_ttl:   Duration,
+}
+6. Metrics & Report
+Capture at minimum:
+
+Field	Description
+gross_pnl_cents	Sum((sell_price - buy_price) * qty) over matched pairs.
+num_spreads	Count of completed round‑trips.
+volume_traded	Σ qty filled (both sides).
+win_rate	num_round_trips_positive / total_round_trips.
+roi	gross_pnl / max(abs(net_position_cost)) if needed.
+
+Engine::run() returns Report { metrics, fills: Vec<Fill>, orders: Vec<OrderAudit> }.
+
+7. CLI Skeleton (optional)
+bash
+Copy
+cargo run -- backtest \
+    --orderbook data/orderbooks.csv \
+    --trades    data/trades.csv \
+    --contract  KXMLBGAME-25JUL22SDMIA-SD \
+    --latency-ms 5 \
+    --min-spread 4 \
+    --qty 50 \
+    --max-pos 100 \
+    --ttl-sec 5
+Implementation Notes
+Global sequence: Verify strictly increasing seq; abort on gap or regress (data‑quality guard).
+
+Performance: Stream‑process files; avoid loading whole CSV if memory‑constrained.
+
+Threading: Single‑thread OK (deterministic). If multi‑threading, gate event loop with a channel feeding workers per‑market.
+
+Extensibility: You can plug alternative strategies by implementing the Strategy trait.
+
+No external Kalshi dependencies: All execution is local; HTTP/WebSocket code paths are unused in backtest.
+
+This spec is intentionally concise yet complete enough for engineers to build a deterministic, maker‑only, limit‑order back‑tester in Rust without assuming any particular project layout.
