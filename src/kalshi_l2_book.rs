@@ -3,12 +3,13 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 
 /// L2 order book for Kalshi YES/NO contracts
-/// YES levels are treated as bids, NO levels are treated as asks
+/// YES levels are bids, NO levels are asks (with price inverted to 100-price)
 #[derive(Debug, Clone)]
 pub struct OrderBook {
-    /// YES side levels (price -> quantity), sorted ascending
+    /// YES side levels (bids) - price -> quantity, sorted ascending
     yes_levels: BTreeMap<u8, i64>,
-    /// NO side levels (price -> quantity), sorted ascending  
+    /// NO side levels (asks) - price -> quantity, sorted ascending
+    /// Note: NO prices are stored as-is, but converted to (100-price) when getting asks
     no_levels: BTreeMap<u8, i64>,
     /// Last update timestamp
     last_update_ts: u64,
@@ -30,14 +31,14 @@ impl OrderBook {
         self.yes_levels.clear();
         self.no_levels.clear();
 
-        // Add YES levels
+        // Add YES levels (bids)
         for (price, qty) in yes_levels {
             if qty > 0 {
                 self.yes_levels.insert(price, qty);
             }
         }
 
-        // Add NO levels
+        // Add NO levels (asks) - store as-is, will convert when needed
         for (price, qty) in no_levels {
             if qty > 0 {
                 self.no_levels.insert(price, qty);
@@ -45,8 +46,6 @@ impl OrderBook {
         }
 
         self.last_update_ts = ts;
-        self.validate_book()?;
-
         Ok(())
     }
 
@@ -70,15 +69,13 @@ impl OrderBook {
         }
 
         self.last_update_ts = ts;
-        self.validate_book()?;
-
         Ok(())
     }
 
     /// Get the best bid and ask prices in cents
     /// Returns (bid_price, ask_price) where:
-    /// - bid_price is the highest YES price (best price to sell YES)
-    /// - ask_price is the lowest NO price (best price to buy YES)
+    /// - bid_price is the highest YES price (best bid)
+    /// - ask_price is the lowest inverted NO price (best ask)
     pub fn best_bid_ask(&self) -> (u8, u8) {
         let best_bid = self.yes_levels
             .iter()
@@ -87,11 +84,14 @@ impl OrderBook {
             .map(|(&price, _)| price)
             .unwrap_or(0);
 
+        // For NO side, we need to find the lowest (100-price) value
+        // This means finding the highest NO price and inverting it
         let best_ask = self.no_levels
             .iter()
-            .next() // Lowest price first
-            .map(|(&price, _)| price)
-            .unwrap_or(100); // Default to 100 cents if no asks
+            .rev() // Highest NO price first
+            .next()
+            .map(|(&price, _)| 100 - price) // Invert the price
+            .unwrap_or(100);
 
         (best_bid, best_ask)
     }
@@ -105,12 +105,13 @@ impl OrderBook {
             .map(|(&price, &qty)| (price, qty))
     }
 
-    /// Get the best ask price and quantity
+    /// Get the best ask price and quantity  
     pub fn best_ask(&self) -> Option<(u8, i64)> {
         self.no_levels
             .iter()
+            .rev() // Highest NO price = lowest ask price when inverted
             .next()
-            .map(|(&price, &qty)| (price, qty))
+            .map(|(&price, &qty)| (100 - price, qty)) // Invert the price
     }
 
     /// Get quantity available at a specific price and side
@@ -130,12 +131,16 @@ impl OrderBook {
             .collect()
     }
 
-    /// Get all NO levels (asks) as a vector sorted by price ascending
+    /// Get all NO levels (asks) as a vector sorted by price ascending (after inversion)
     pub fn get_no_levels(&self) -> Vec<(u8, i64)> {
-        self.no_levels
+        let mut inverted_levels: Vec<(u8, i64)> = self.no_levels
             .iter()
-            .map(|(&price, &qty)| (price, qty))
-            .collect()
+            .map(|(&price, &qty)| (100 - price, qty)) // Invert NO prices
+            .collect();
+        
+        // Sort by inverted price ascending (lowest ask first)
+        inverted_levels.sort_by_key(|(price, _)| *price);
+        inverted_levels
     }
 
     /// Get the spread in cents
@@ -152,10 +157,9 @@ impl OrderBook {
     fn validate_book(&self) -> Result<()> {
         let (best_bid, best_ask) = self.best_bid_ask();
         
-        // In a valid Kalshi book, YES + NO prices should sum to 100 cents
-        // And best_bid should be <= best_ask
+        // In a valid book, best_bid should be < best_ask
         if best_bid > 0 && best_ask < 100 && best_bid >= best_ask {
-            eprintln!("Warning: Potentially crossed market - bid: {}, ask: {}", best_bid, best_ask);
+            println!("Warning: Potentially crossed market - bid: {}, ask: {}", best_bid, best_ask);
         }
 
         Ok(())
@@ -219,6 +223,53 @@ impl OrderBook {
             None
         }
     }
+
+    /// Debug function to print the orderbook state
+    pub fn debug_print(&self) {
+        println!("=== Orderbook Debug ===");
+        println!("YES levels (bids): {:?}", self.yes_levels);
+        println!("NO levels (raw): {:?}", self.no_levels);
+        println!("NO levels (inverted asks): {:?}", self.get_no_levels());
+        let (bid, ask) = self.best_bid_ask();
+        println!("Best bid: {}, Best ask: {}, Spread: {}", bid, ask, self.spread());
+        println!("=======================");
+    }
+
+    /// Get the number of YES levels (bids)
+    pub fn yes_level_count(&self) -> usize {
+        self.yes_levels.len()
+    }
+
+    /// Get the number of NO levels (asks)
+    pub fn no_level_count(&self) -> usize {
+        self.no_levels.len()
+    }
+
+    /// Condensed debug view showing just the best levels
+    pub fn debug_print_top(&self) {
+        let (bid, ask) = self.best_bid_ask();
+        
+        // Get top 5 bid levels
+        let top_bids: Vec<_> = self.yes_levels
+            .iter()
+            .rev()
+            .take(5)
+            .map(|(&price, &qty)| format!("{}@{}", qty, price))
+            .collect();
+            
+        // Get top 5 ask levels (from inverted NO levels)
+        let top_asks: Vec<_> = self.get_no_levels()
+            .iter()
+            .take(5)
+            .map(|(price, qty)| format!("{}@{}", qty, price))
+            .collect();
+
+        println!("📊 {} | Bids: [{}] | Asks: [{}] | Spread: {}", 
+                self.yes_levels.len() + self.no_levels.len(),
+                top_bids.join(", "), 
+                top_asks.join(", "), 
+                self.spread());
+    }
 }
 
 impl Default for OrderBook {
@@ -227,7 +278,7 @@ impl Default for OrderBook {
     }
 }
 
-/// Update an orderbook with an event
+/// Update an orderbook with an event (snapshot, delta, or trade)
 pub fn update_book_with_event(book: &mut OrderBook, event: &Event) -> Result<()> {
     match event {
         Event::Snapshot { yes_levels, no_levels, ts, .. } => {
@@ -237,7 +288,8 @@ pub fn update_book_with_event(book: &mut OrderBook, event: &Event) -> Result<()>
             book.apply_delta(*side, *price, *delta, *ts)?;
         }
         Event::Trade { .. } => {
-            // Trades don't update the book directly, but could be used for validation
+            // Trades don't update the orderbook directly
+            // They might be processed separately for fills
         }
     }
     Ok(())

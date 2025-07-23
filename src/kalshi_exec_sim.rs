@@ -14,6 +14,7 @@ use std::time::Duration;
 pub struct Engine {
     state: SimState,
     config: SimConfig,
+    event_count: usize, // For debug output
 }
 
 /// Internal simulation state
@@ -63,6 +64,7 @@ impl Engine {
                 position_tracker: HashMap::new(),
             },
             config,
+            event_count: 0,
         }
     }
 
@@ -75,8 +77,12 @@ impl Engine {
     where
         I: Iterator<Item = Result<Event>>,
     {
+        let mut event_count = 0;
+        let mut delta_count = 0;
+
         for event_result in events {
             let event = event_result?;
+            event_count += 1;
             
             // Check if we should stop based on config
             if let Some(end_time) = self.config.end_time {
@@ -90,8 +96,23 @@ impl Engine {
                 continue;
             }
 
+            // Track delta events for debugging
+            if matches!(event, Event::Delta { .. }) {
+                delta_count += 1;
+            }
+
             self.process_event(event, strategy)?;
         }
+
+        // Show final orderbook state for each market
+        println!("\n=== FINAL ORDERBOOK STATES ===");
+        for (ticker, book) in &self.state.books {
+            println!("Final state for {}:", ticker);
+            book.debug_print_top();
+            println!("  (Full book has {} YES levels, {} NO levels)", 
+                    book.yes_level_count(), book.no_level_count());
+        }
+        println!("Processed {} total events ({} deltas)", event_count, delta_count);
 
         // Finalize metrics
         self.state.metrics.calculate_win_rate();
@@ -113,6 +134,31 @@ impl Engine {
         // Step 2: Apply market event to orderbook
         let book = self.state.books.entry(ticker.clone()).or_insert_with(OrderBook::new);
         update_book_with_event(book, &event)?;
+
+        // Debug output for first few events to verify orderbook construction
+        if self.event_count < 3 {
+            match &event {
+                Event::Snapshot { .. } => {
+                    println!("Debug: Event {} - Snapshot for {}", self.event_count + 1, ticker);
+                    book.debug_print();
+                }
+                _ => {}
+            }
+        }
+        
+        // Show orderbook state every 50 deltas to see evolution
+        match &event {
+            Event::Delta { .. } => {
+                // Show state every 50 deltas for the first market we see
+                if (self.event_count - 3) % 50 == 0 && self.event_count > 3 {
+                    println!("Debug: After {} deltas for {}:", self.event_count - 3, ticker);
+                    book.debug_print_top();
+                }
+            }
+            _ => {}
+        }
+
+        self.event_count += 1;
 
         // Step 3: Process fills if this is a trade event
         if let Event::Trade { yes_price, no_price, qty, taker, .. } = &event {

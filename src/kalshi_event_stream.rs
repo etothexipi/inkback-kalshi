@@ -109,14 +109,30 @@ where
     fn process_orderbook_row(&mut self, raw_row: RawObRow) -> Result<()> {
         match raw_row.msg_type.as_str() {
             "snapshot" => {
-                // Buffer snapshot rows until we have all for the same (seq, ticker)
-                let key = (raw_row.seq, raw_row.ticker.clone());
-                self.snapshot_buffer.entry(key).or_insert_with(Vec::new).push(raw_row);
+                // Before adding this row, check if we need to flush previous snapshots
+                let current_key = (raw_row.seq, raw_row.ticker.clone());
                 
-                // Check if we should flush any complete snapshots
-                self.flush_complete_snapshots()?;
+                // Flush any snapshots with different (seq, ticker) than the current row
+                let keys_to_flush: Vec<_> = self.snapshot_buffer
+                    .keys()
+                    .filter(|&key| key != &current_key)
+                    .cloned()
+                    .collect();
+                
+                for key in keys_to_flush {
+                    if let Some(snapshot_rows) = self.snapshot_buffer.remove(&key) {
+                        self.create_snapshot_event(snapshot_rows)?;
+                    }
+                }
+                
+                // Add current row to buffer
+                self.snapshot_buffer.entry(current_key).or_insert_with(Vec::new).push(raw_row);
             }
             "delta" => {
+                // Before processing delta, flush any pending snapshots
+                // as they should come before deltas
+                self.flush_all_snapshots()?;
+                
                 let event = Event::Delta {
                     seq: raw_row.seq,
                     ts: raw_row.ts,
@@ -138,9 +154,7 @@ where
         Ok(())
     }
 
-    fn flush_complete_snapshots(&mut self) -> Result<()> {
-        // For now, assume each snapshot row is complete 
-        // In practice, you might need more sophisticated logic to determine when a snapshot is complete
+    fn flush_all_snapshots(&mut self) -> Result<()> {
         let keys_to_flush: Vec<_> = self.snapshot_buffer.keys().cloned().collect();
         
         for key in keys_to_flush {
@@ -150,6 +164,11 @@ where
         }
         
         Ok(())
+    }
+
+    fn flush_complete_snapshots(&mut self) -> Result<()> {
+        // This method is now only called at the end of the stream
+        self.flush_all_snapshots()
     }
 
     fn create_snapshot_event(&mut self, snapshot_rows: Vec<RawObRow>) -> Result<()> {
@@ -162,13 +181,28 @@ where
         let mut yes_levels = Vec::new();
         let mut no_levels = Vec::new();
 
-        // Aggregate all levels from all snapshot rows with the same (seq, ticker)
+        // Aggregate levels from snapshot rows
         for row in &snapshot_rows {
+            // Check if this row has pre-aggregated levels (old format)
             if let Some(ref levels) = row.yes_levels {
                 yes_levels.extend_from_slice(levels);
             }
             if let Some(ref levels) = row.no_levels {
                 no_levels.extend_from_slice(levels);
+            }
+            
+            // Check if this row has individual level data (new format)
+            if let (Some(side), Some(price), Some(quantity)) = (row.side, row.price, row.quantity) {
+                if quantity > 0 {
+                    match side {
+                        crate::kalshi_types::Side::Yes => {
+                            yes_levels.push((price, quantity));
+                        }
+                        crate::kalshi_types::Side::No => {
+                            no_levels.push((price, quantity));
+                        }
+                    }
+                }
             }
         }
 
