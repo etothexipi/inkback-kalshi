@@ -5,7 +5,7 @@
 .env
 
 # data
-/src/data
+# /src/data
 
 # keys
 *.pem
