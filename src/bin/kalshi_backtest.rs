@@ -274,12 +274,27 @@ fn main() -> Result<()> {
                     println!("{}", perf);
                     
                     if report.fills.len() > 0 {
-                        println!("\n📋 Recent Fills:");
-                        for fill in report.fills.iter().take(3) {
-                            println!("  {} contracts @ {} cents", fill.qty, fill.price);
-                        }
-                        if report.fills.len() > 3 {
-                            println!("  ... and {} more fills", report.fills.len() - 3);
+                        if report.fills.len() <= 6 {
+                            // Show all fills if 6 or fewer
+                            println!("\n📋 All Fills:");
+                            for fill in &report.fills {
+                                println!("  {} contracts @ {} cents", fill.qty, fill.price);
+                            }
+                        } else {
+                            // Show first 3 and last 3 fills
+                            println!("\n📋 First & Last Fills:");
+                            
+                            println!("  First 3:");
+                            for fill in report.fills.iter().take(3) {
+                                println!("    {} contracts @ {} cents", fill.qty, fill.price);
+                            }
+                            
+                            println!("  ... {} fills in between ...", report.fills.len() - 6);
+                            
+                            println!("  Last 3:");
+                            for fill in report.fills.iter().rev().take(3).rev() {
+                                println!("    {} contracts @ {} cents", fill.qty, fill.price);
+                            }
                         }
                     }
 

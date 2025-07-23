@@ -184,11 +184,6 @@ impl KalshiStrategy for SpreadMmStrategy {
     }
 
     fn on_fill(&mut self, fill: &Fill) {
-        println!(
-            "Fill: order_id={}, price={}, qty={}, ts={}",
-            fill.id, fill.price, fill.qty, fill.ts
-        );
-
         // Remove filled order from active orders
         self.active_orders.retain(|&id| id != fill.id);
 
@@ -207,8 +202,6 @@ impl KalshiStrategy for SpreadMmStrategy {
             // Likely a NO buy
             self.position -= fill.qty;
         }
-
-        println!("Updated position: {}", self.position);
     }
 }
 
@@ -278,21 +271,11 @@ impl KalshiStrategy for DirectionalStrategy {
     }
 
     fn on_fill(&mut self, fill: &Fill) {
-        println!(
-            "Directional fill: order_id={}, price={}, qty={}",
-            fill.id, fill.price, fill.qty
-        );
-
         // Update position based on the side we're targeting
         match self.target_side {
             Side::Yes => self.current_position += fill.qty,
             Side::No => self.current_position += fill.qty, // NO position is still positive quantity
         }
-
-        println!(
-            "Directional position updated: {} / {} target",
-            self.current_position, self.target_quantity
-        );
     }
 }
 

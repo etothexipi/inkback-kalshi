@@ -135,29 +135,6 @@ impl Engine {
         let book = self.state.books.entry(ticker.clone()).or_insert_with(OrderBook::new);
         update_book_with_event(book, &event)?;
 
-        // Debug output for first few events to verify orderbook construction
-        if self.event_count < 3 {
-            match &event {
-                Event::Snapshot { .. } => {
-                    println!("Debug: Event {} - Snapshot for {}", self.event_count + 1, ticker);
-                    book.debug_print();
-                }
-                _ => {}
-            }
-        }
-        
-        // Show orderbook state every 50 deltas to see evolution
-        match &event {
-            Event::Delta { .. } => {
-                // Show state every 50 deltas for the first market we see
-                if (self.event_count - 3) % 50 == 0 && self.event_count > 3 {
-                    println!("Debug: After {} deltas for {}:", self.event_count - 3, ticker);
-                    book.debug_print_top();
-                }
-            }
-            _ => {}
-        }
-
         self.event_count += 1;
 
         // Step 3: Process fills if this is a trade event
