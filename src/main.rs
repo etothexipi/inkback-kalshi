@@ -15,10 +15,25 @@ mod backtester;
 mod plot;
 pub mod slippage_models;
 
+// Kalshi backtesting modules
+mod kalshi_types;
+mod kalshi_csv_io;
+mod kalshi_event_stream;
+mod kalshi_l2_book;
+mod kalshi_strategy;
+mod kalshi_exec_sim;
+mod kalshi_backtest;
+
 use plot::plot_equity_curves;
 use strategy::Strategy;
 use utils::fetch::fetch_and_save_csv;
 use crate::{slippage_models::TransactionCosts, strategy::{Candle, Order, OrderType, StrategyParams}};
+
+// Import Kalshi modules
+use kalshi_backtest::{KalshiBacktest, run_simple_backtest, calculate_performance_metrics};
+use kalshi_strategy::{KalshiStrategy, SpreadMmStrategy, SpreadMmParams, DirectionalStrategy};
+use kalshi_types::{SimConfig, Side};
+use std::time::Duration;
 
 // InkBack schemas
 pub enum InkBackSchema {
@@ -263,11 +278,108 @@ impl Strategy for FootprintVolumeImbalance {
     }
 }
 
+/// Run Kalshi backtesting demo
+fn run_kalshi_demo() -> Result<()> {
+    println!("=== Kalshi Backtesting Demo ===\n");
+
+    // For demonstration, we'll create some sample data files
+    // In practice, you'd have real Kalshi data files
+    create_sample_kalshi_data()?;
+
+    let config = SimConfig {
+        latency: Duration::from_millis(5),
+        start_time: 0,
+        end_time: None,
+    };
+
+    // Test spread market making strategy
+    println!("Testing Spread Market Making Strategy:");
+    let params = SpreadMmParams {
+        min_spread: 4,
+        post_qty: 50,
+        max_pos: 100,
+        order_ttl: Duration::from_secs(5),
+    };
+
+    let mut strategy = SpreadMmStrategy::new(params);
+    let backtest = KalshiBacktest::new(config.clone());
+
+    match backtest.run_from_files("sample_orderbook.csv", "sample_trades.csv", &mut strategy) {
+        Ok(result) => {
+            let perf = calculate_performance_metrics(&result);
+            println!("{}\n", perf);
+        }
+        Err(e) => {
+            println!("Spread MM strategy failed: {}\n", e);
+        }
+    }
+
+    // Test directional strategy
+    println!("Testing Directional Strategy (YES bias):");
+    let mut directional_strategy = DirectionalStrategy::new(Side::Yes, 100, 60);
+
+    match backtest.run_from_files("sample_orderbook.csv", "sample_trades.csv", &mut directional_strategy) {
+        Ok(result) => {
+            let perf = calculate_performance_metrics(&result);
+            println!("{}\n", perf);
+        }
+        Err(e) => {
+            println!("Directional strategy failed: {}\n", e);
+        }
+    }
+
+    // Test simple backtest function
+    println!("Testing Simple Backtest Function:");
+    let mut simple_strategy = SpreadMmStrategy::new(SpreadMmParams::default());
+    
+    match run_simple_backtest("sample_orderbook.csv", "sample_trades.csv", &mut simple_strategy, 10) {
+        Ok(result) => {
+            let perf = calculate_performance_metrics(&result);
+            println!("{}\n", perf);
+        }
+        Err(e) => {
+            println!("Simple backtest failed: {}\n", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Create sample Kalshi data files for demonstration
+fn create_sample_kalshi_data() -> Result<()> {
+    use std::fs::File;
+    use std::io::Write;
+
+    // Create sample orderbook data
+    let mut orderbook_file = File::create("sample_orderbook.csv")?;
+    writeln!(orderbook_file, "seq,client_ts,ticker,msg_type,yes_levels,no_levels")?;
+    writeln!(orderbook_file, "1,1640995200000,DEMO-CONTRACT,snapshot,\"[{{\"price\":45,\"quantity\":100}},{{\"price\":44,\"quantity\":200}}]\",\"[{{\"price\":55,\"quantity\":150}},{{\"price\":56,\"quantity\":250}}]\"")?;
+    writeln!(orderbook_file, "3,1640995202000,DEMO-CONTRACT,snapshot,\"[{{\"price\":46,\"quantity\":120}},{{\"price\":45,\"quantity\":180}}]\",\"[{{\"price\":54,\"quantity\":130}},{{\"price\":55,\"quantity\":220}}]\"")?;
+    writeln!(orderbook_file, "5,1640995204000,DEMO-CONTRACT,snapshot,\"[{{\"price\":47,\"quantity\":90}},{{\"price\":46,\"quantity\":160}}]\",\"[{{\"price\":53,\"quantity\":110}},{{\"price\":54,\"quantity\":190}}]\"")?;
+
+    // Create sample trades data
+    let mut trades_file = File::create("sample_trades.csv")?;
+    writeln!(trades_file, "seq,client_ts,ticker,yes_price,no_price,quantity,taker")?;
+    writeln!(trades_file, "2,1640995201000,DEMO-CONTRACT,46,54,25,yes")?;
+    writeln!(trades_file, "4,1640995203000,DEMO-CONTRACT,46,54,35,no")?;
+    writeln!(trades_file, "6,1640995205000,DEMO-CONTRACT,47,53,20,yes")?;
+
+    println!("Created sample data files: sample_orderbook.csv, sample_trades.csv");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load environment variables
     dotenvy::dotenv().ok();
 
+    // Check command line arguments for Kalshi demo
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "kalshi" {
+        return run_kalshi_demo();
+    }
+
+    // Original databento backtesting logic
     // Define historical data range
     let start = date!(2025 - 01 - 01).with_time(time!(00:00)).assume_utc();
     let end = date!(2025 - 06 - 01).with_time(time!(00:00)).assume_utc();
