@@ -8,6 +8,31 @@ use csv::ReaderBuilder;
 
 use InkBack::{KalshiBacktest, calculate_performance_metrics, SpreadMmStrategy, SpreadMmParams, DirectionalStrategy, SimConfig, Side};
 
+#[derive(Debug, Clone)]
+struct MarketResult {
+    market_ticker: String,
+    report: InkBack::kalshi_types::Report,
+    performance: InkBack::kalshi_backtest::PerformanceMetrics,
+}
+
+#[derive(Debug)]
+struct AggregatedMetrics {
+    total_markets: usize,
+    profitable_markets: usize,
+    total_gross_pnl: f64,
+    total_volume: i64,
+    total_trades: usize,
+    total_orders: usize,
+    total_fills: usize,
+    total_cancelled: usize,
+    total_expired: usize,
+    avg_win_rate: f64,
+    best_market: Option<String>,
+    worst_market: Option<String>,
+    best_pnl: f64,
+    worst_pnl: f64,
+}
+
 fn main() -> Result<()> {
     let matches = Command::new("kalshi_backtest")
         .about("Run Kalshi backtests with real CSV data")
@@ -33,6 +58,13 @@ fn main() -> Result<()> {
                 .short('m')
                 .value_name("TICKER")
                 .help("Specific market ticker to backtest (e.g., 'KXMLBGAME-25JUL23SDMIA-SD')")
+                .required(false),
+        )
+        .arg(
+            Arg::new("prefix")
+                .long("prefix")
+                .value_name("PREFIX")
+                .help("Market ticker prefix to filter markets (e.g., 'KXMLBGAME' to test all MLB games)")
                 .required(false),
         )
         .arg(
@@ -91,11 +123,18 @@ fn main() -> Result<()> {
                 .help("Run backtest on all markets found in the data files")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("summary_only")
+                .long("summary-only")
+                .help("Show only aggregated summary, skip individual market details")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let data_dir = matches.get_one::<String>("data").unwrap();
     let pattern = matches.get_one::<String>("pattern");
     let target_market = matches.get_one::<String>("market");
+    let market_prefix = matches.get_one::<String>("prefix");
     let strategy_type = matches.get_one::<String>("strategy").unwrap();
     let latency_ms: u64 = matches.get_one::<String>("latency").unwrap().parse()?;
     let min_spread: u8 = matches.get_one::<String>("min_spread").unwrap().parse()?;
@@ -104,6 +143,7 @@ fn main() -> Result<()> {
     let list_files = matches.get_flag("list_files");
     let list_markets = matches.get_flag("list_markets");
     let all_markets = matches.get_flag("all_markets");
+    let summary_only = matches.get_flag("summary_only");
 
     // Verify data directory exists
     if !Path::new(data_dir).exists() {
@@ -138,8 +178,10 @@ fn main() -> Result<()> {
         for (i, market) in available_markets.iter().enumerate() {
             println!("  {}. {}", i + 1, market);
         }
-        println!("\nUse --market <TICKER> to backtest a specific market");
-        println!("Use --all-markets to backtest all markets");
+        println!("\nOptions:");
+        println!("  --market <TICKER>     : Backtest a specific market");
+        println!("  --prefix <PREFIX>     : Backtest all markets with prefix");
+        println!("  --all-markets         : Backtest all markets");
         return Ok(());
     }
 
@@ -164,6 +206,25 @@ fn main() -> Result<()> {
     // Determine which markets to backtest
     let markets_to_test = if all_markets {
         available_markets
+    } else if let Some(prefix) = market_prefix {
+        let filtered_markets: Vec<String> = available_markets
+            .into_iter()
+            .filter(|market| market.starts_with(prefix))
+            .collect();
+        
+        if filtered_markets.is_empty() {
+            anyhow::bail!("No markets found with prefix '{}'. Use --list-markets to see available markets", prefix);
+        }
+        
+        println!("🔍 Found {} markets with prefix '{}'", filtered_markets.len(), prefix);
+        if !summary_only {
+            for market in &filtered_markets {
+                println!("  📈 {}", market);
+            }
+        }
+        println!();
+        
+        filtered_markets
     } else if let Some(market) = target_market {
         if !available_markets.contains(market) {
             anyhow::bail!("Market '{}' not found in data files. Available markets: {:?}", market, available_markets);
@@ -173,13 +234,16 @@ fn main() -> Result<()> {
         // Default to the first market if none specified
         println!("💡 No specific market selected, using: {}", available_markets[0]);
         println!("   Use --list-markets to see all available markets");
+        println!("   Use --prefix <PREFIX> to test multiple markets");
         println!();
         vec![available_markets[0].clone()]
     };
 
-    // Run backtest for each selected market
+    // Run backtest for each selected market and collect results
+    let mut market_results = Vec::new();
+    
     for (i, market_ticker) in markets_to_test.iter().enumerate() {
-        if markets_to_test.len() > 1 {
+        if markets_to_test.len() > 1 && !summary_only {
             println!("🏪 Market {}/{}: {}", i + 1, markets_to_test.len(), market_ticker);
             println!("{}", "=".repeat(60));
         }
@@ -198,40 +262,213 @@ fn main() -> Result<()> {
         match result {
             Ok(report) => {
                 let perf = calculate_performance_metrics(&report);
-                println!("✅ Backtest completed for {}!\n", market_ticker);
-                println!("{}", perf);
                 
-                if report.fills.len() > 0 {
-                    println!("\n📋 Recent Fills:");
-                    for fill in report.fills.iter().take(5) {
-                        println!("  {} contracts @ {} cents", fill.qty, fill.price);
+                market_results.push(MarketResult {
+                    market_ticker: market_ticker.clone(),
+                    report: report.clone(),
+                    performance: perf.clone(),
+                });
+
+                if !summary_only {
+                    println!("✅ Backtest completed for {}!\n", market_ticker);
+                    println!("{}", perf);
+                    
+                    if report.fills.len() > 0 {
+                        println!("\n📋 Recent Fills:");
+                        for fill in report.fills.iter().take(3) {
+                            println!("  {} contracts @ {} cents", fill.qty, fill.price);
+                        }
+                        if report.fills.len() > 3 {
+                            println!("  ... and {} more fills", report.fills.len() - 3);
+                        }
                     }
-                    if report.fills.len() > 5 {
-                        println!("  ... and {} more fills", report.fills.len() - 5);
+
+                    println!("\n📊 Order Summary:");
+                    println!("  Total Orders: {}", report.metrics.total_orders);
+                    println!("  Filled Orders: {}", report.metrics.total_fills);
+                    println!("  Cancelled Orders: {}", report.metrics.cancelled_orders);
+                    println!("  Expired Orders: {}", report.metrics.expired_orders);
+                } else {
+                    print!(".");
+                    if (i + 1) % 50 == 0 {
+                        println!(" {}/{}", i + 1, markets_to_test.len());
                     }
                 }
-
-                println!("\n📊 Order Summary:");
-                println!("  Total Orders: {}", report.metrics.total_orders);
-                println!("  Filled Orders: {}", report.metrics.total_fills);
-                println!("  Cancelled Orders: {}", report.metrics.cancelled_orders);
-                println!("  Expired Orders: {}", report.metrics.expired_orders);
             }
             Err(e) => {
-                eprintln!("❌ Backtest failed for {}: {}", market_ticker, e);
+                if !summary_only {
+                    eprintln!("❌ Backtest failed for {}: {}", market_ticker, e);
+                } else {
+                    print!("✗");
+                }
             }
         }
 
-        if i < markets_to_test.len() - 1 {
+        if i < markets_to_test.len() - 1 && !summary_only {
             println!("\n{}\n", "─".repeat(60));
         }
     }
 
-    if markets_to_test.len() > 1 {
-        println!("\n🎉 Completed backtests for {} markets", markets_to_test.len());
+    if summary_only && markets_to_test.len() > 1 {
+        println!(); // New line after progress dots
     }
 
+    // Display aggregated results if multiple markets were tested
+    if markets_to_test.len() > 1 {
+        println!("\n{}", "═".repeat(80));
+        println!("📊 AGGREGATED RESULTS ACROSS {} MARKETS", markets_to_test.len());
+        println!("{}", "═".repeat(80));
+        
+        let aggregated = calculate_aggregated_metrics(&market_results);
+        display_aggregated_metrics(&aggregated);
+        
+        // Show top performing markets
+        if !summary_only && market_results.len() > 3 {
+            display_top_markets(&market_results);
+        }
+    }
+
+    println!("\n🎉 Completed backtests for {} markets", markets_to_test.len());
     Ok(())
+}
+
+fn calculate_aggregated_metrics(results: &[MarketResult]) -> AggregatedMetrics {
+    if results.is_empty() {
+        return AggregatedMetrics {
+            total_markets: 0,
+            profitable_markets: 0,
+            total_gross_pnl: 0.0,
+            total_volume: 0,
+            total_trades: 0,
+            total_orders: 0,
+            total_fills: 0,
+            total_cancelled: 0,
+            total_expired: 0,
+            avg_win_rate: 0.0,
+            best_market: None,
+            worst_market: None,
+            best_pnl: 0.0,
+            worst_pnl: 0.0,
+        };
+    }
+
+    let mut total_gross_pnl = 0.0;
+    let mut total_volume = 0i64;
+    let mut total_trades = 0usize;
+    let mut total_orders = 0usize;
+    let mut total_fills = 0usize;
+    let mut total_cancelled = 0usize;
+    let mut total_expired = 0usize;
+    let mut total_win_rate = 0.0;
+    let mut profitable_markets = 0usize;
+    
+    let mut best_pnl = f64::NEG_INFINITY;
+    let mut worst_pnl = f64::INFINITY;
+    let mut best_market = None;
+    let mut worst_market = None;
+
+    for result in results {
+        let pnl = result.performance.gross_pnl_dollars;
+        total_gross_pnl += pnl;
+        total_volume += result.performance.total_volume;
+        total_trades += result.performance.total_trades;
+        total_orders += result.report.metrics.total_orders;
+        total_fills += result.report.metrics.total_fills;
+        total_cancelled += result.report.metrics.cancelled_orders;
+        total_expired += result.report.metrics.expired_orders;
+        total_win_rate += result.performance.win_rate;
+        
+        if pnl > 0.0 {
+            profitable_markets += 1;
+        }
+        
+        if pnl > best_pnl {
+            best_pnl = pnl;
+            best_market = Some(result.market_ticker.clone());
+        }
+        
+        if pnl < worst_pnl {
+            worst_pnl = pnl;
+            worst_market = Some(result.market_ticker.clone());
+        }
+    }
+
+    AggregatedMetrics {
+        total_markets: results.len(),
+        profitable_markets,
+        total_gross_pnl,
+        total_volume,
+        total_trades,
+        total_orders,
+        total_fills,
+        total_cancelled,
+        total_expired,
+        avg_win_rate: total_win_rate / results.len() as f64,
+        best_market,
+        worst_market,
+        best_pnl,
+        worst_pnl,
+    }
+}
+
+fn display_aggregated_metrics(metrics: &AggregatedMetrics) {
+    println!("💰 Total Gross PnL: ${:.2}", metrics.total_gross_pnl);
+    println!("📈 Profitable Markets: {}/{} ({:.1}%)", 
+             metrics.profitable_markets, 
+             metrics.total_markets,
+             (metrics.profitable_markets as f64 / metrics.total_markets as f64) * 100.0);
+    
+    println!("\n📊 Trading Volume:");
+    println!("  Total Volume: {} contracts", metrics.total_volume);
+    println!("  Total Trades: {}", metrics.total_trades);
+    println!("  Avg PnL per Trade: ${:.4}", 
+             if metrics.total_trades > 0 { metrics.total_gross_pnl / metrics.total_trades as f64 } else { 0.0 });
+    
+    println!("\n🎯 Order Statistics:");
+    println!("  Total Orders: {}", metrics.total_orders);
+    println!("  Filled Orders: {} ({:.1}%)", 
+             metrics.total_fills,
+             if metrics.total_orders > 0 { (metrics.total_fills as f64 / metrics.total_orders as f64) * 100.0 } else { 0.0 });
+    println!("  Cancelled Orders: {} ({:.1}%)", 
+             metrics.total_cancelled,
+             if metrics.total_orders > 0 { (metrics.total_cancelled as f64 / metrics.total_orders as f64) * 100.0 } else { 0.0 });
+    println!("  Expired Orders: {} ({:.1}%)", 
+             metrics.total_expired,
+             if metrics.total_orders > 0 { (metrics.total_expired as f64 / metrics.total_orders as f64) * 100.0 } else { 0.0 });
+    
+    println!("\n🏆 Performance Highlights:");
+    println!("  Average Win Rate: {:.1}%", metrics.avg_win_rate * 100.0);
+    
+    if let Some(best) = &metrics.best_market {
+        println!("  Best Market: {} (${:.2})", best, metrics.best_pnl);
+    }
+    
+    if let Some(worst) = &metrics.worst_market {
+        println!("  Worst Market: {} (${:.2})", worst, metrics.worst_pnl);
+    }
+}
+
+fn display_top_markets(results: &[MarketResult]) {
+    let mut sorted_results = results.to_vec();
+    sorted_results.sort_by(|a, b| b.performance.gross_pnl_dollars.partial_cmp(&a.performance.gross_pnl_dollars).unwrap());
+    
+    println!("\n🏆 TOP 5 PERFORMING MARKETS:");
+    for (i, result) in sorted_results.iter().take(5).enumerate() {
+        println!("  {}. {} - ${:.2} ({} trades)", 
+                 i + 1, 
+                 result.market_ticker,
+                 result.performance.gross_pnl_dollars,
+                 result.performance.total_trades);
+    }
+    
+    println!("\n📉 BOTTOM 5 PERFORMING MARKETS:");
+    for (i, result) in sorted_results.iter().rev().take(5).enumerate() {
+        println!("  {}. {} - ${:.2} ({} trades)", 
+                 i + 1, 
+                 result.market_ticker,
+                 result.performance.gross_pnl_dollars,
+                 result.performance.total_trades);
+    }
 }
 
 fn run_backtest_for_market(
