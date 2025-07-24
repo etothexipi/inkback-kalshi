@@ -507,9 +507,9 @@ fn run_backtest_for_market(
         "spread_mm" => {
             let params = SpreadMmParams {
                 min_spread,
-                post_qty: qty,
-                max_pos,
-                order_ttl: Duration::from_secs(10),
+                quote_quantity: qty,
+                max_position: max_pos,
+                order_ttl: Duration::from_secs(5),
             };
             let mut strategy = SpreadMmStrategy::new(params);
             backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)

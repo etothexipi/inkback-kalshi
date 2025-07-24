@@ -104,7 +104,8 @@ impl Engine {
             self.process_event(event, strategy)?;
         }
 
-        // Finalize metrics
+        // Finalize metrics and settle remaining positions
+        self.finalize_strategy_pnl(strategy);
         self.state.metrics.calculate_win_rate();
 
         Ok(Report {
@@ -112,6 +113,51 @@ impl Engine {
             fills: self.extract_fills_from_audit(),
             orders: self.state.order_audit.clone(),
         })
+    }
+    
+    /// Finalize PnL by settling any remaining positions based on market resolution
+    fn finalize_strategy_pnl(&mut self, strategy: &mut dyn KalshiStrategy) {
+        // For SpreadMmStrategy, we need to settle final positions
+        if let Some(spread_strategy) = strategy.as_any().downcast_mut::<crate::kalshi_strategy::SpreadMmStrategy>() {
+            // Determine market resolution from final orderbook states
+            for (ticker, book) in &self.state.books {
+                let market_resolved_price = self.determine_market_resolution(book);
+                let settlement_pnl = spread_strategy.settle_final_position(market_resolved_price);
+                
+                // Add settlement PnL to metrics
+                self.state.metrics.gross_pnl_cents += settlement_pnl;
+            }
+            
+            // Get total PnL from strategy (including all round-trips)
+            let total_strategy_pnl = spread_strategy.get_total_pnl_cents(None);
+            
+            // Update metrics with the correct total
+            self.state.metrics.gross_pnl_cents = total_strategy_pnl;
+        }
+    }
+    
+    /// Determine market resolution based on final orderbook state
+    fn determine_market_resolution(&self, book: &crate::kalshi_l2_book::OrderBook) -> u8 {
+        let (bid, ask) = book.best_bid_ask();
+        
+        // Market resolution logic:
+        // - If bids are at 99¢ and no meaningful asks, YES wins (100¢)
+        // - If asks are at 1¢ and no meaningful bids, NO wins (0¢)
+        // - Otherwise, use mid-price as settlement
+        
+        if bid >= 99 && ask >= 100 {
+            // YES clearly winning
+            100
+        } else if ask <= 1 && bid == 0 {
+            // NO clearly winning  
+            0
+        } else if bid > 0 && ask < 100 {
+            // Use mid-price for settlement
+            (bid + ask) / 2
+        } else {
+            // Default to 50¢ if unclear
+            50
+        }
     }
 
     fn process_event(&mut self, event: Event, strategy: &mut dyn KalshiStrategy) -> Result<()> {
