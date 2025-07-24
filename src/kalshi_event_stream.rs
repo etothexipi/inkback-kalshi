@@ -109,29 +109,18 @@ where
     fn process_orderbook_row(&mut self, raw_row: RawObRow) -> Result<()> {
         match raw_row.msg_type.as_str() {
             "snapshot" => {
-                // Before adding this row, check if we need to flush previous snapshots
+                // For snapshot rows, just add to buffer - don't flush other snapshots
+                // This allows all snapshot rows with the same (seq, ticker) to accumulate
                 let current_key = (raw_row.seq, raw_row.ticker.clone());
                 
-                // Flush any snapshots with different (seq, ticker) than the current row
-                let keys_to_flush: Vec<_> = self.snapshot_buffer
-                    .keys()
-                    .filter(|&key| key != &current_key)
-                    .cloned()
-                    .collect();
-                
-                for key in keys_to_flush {
-                    if let Some(snapshot_rows) = self.snapshot_buffer.remove(&key) {
-                        self.create_snapshot_event(snapshot_rows)?;
-                    }
-                }
-                
-                // Add current row to buffer
                 self.snapshot_buffer.entry(current_key).or_insert_with(Vec::new).push(raw_row);
             }
             "delta" => {
-                // Before processing delta, flush any pending snapshots
-                // as they should come before deltas
-                self.flush_all_snapshots()?;
+                // Before processing ANY delta, flush ALL pending snapshots
+                // This ensures snapshots are processed before deltas, regardless of ticker
+                if !self.snapshot_buffer.is_empty() {
+                    self.flush_all_snapshots()?;
+                }
                 
                 let event = Event::Delta {
                     seq: raw_row.seq,
@@ -178,22 +167,13 @@ where
 
         // Take the first row for basic info
         let first_row = &snapshot_rows[0];
+
         let mut yes_levels = Vec::new();
         let mut no_levels = Vec::new();
 
-        // Aggregate levels from snapshot rows
         for row in &snapshot_rows {
-            // Check if this row has pre-aggregated levels (old format)
-            if let Some(ref levels) = row.yes_levels {
-                yes_levels.extend_from_slice(levels);
-            }
-            if let Some(ref levels) = row.no_levels {
-                no_levels.extend_from_slice(levels);
-            }
-            
-            // Check if this row has individual level data (new format)
-            if let (Some(side), Some(price), Some(quantity)) = (row.side, row.price, row.quantity) {
-                if quantity > 0 {
+            if let (Some(side), Some(price), Some(quantity)) = (&row.side, row.price, row.quantity) {
+                if quantity > 0 {  // Only include positive quantities
                     match side {
                         crate::kalshi_types::Side::Yes => {
                             yes_levels.push((price, quantity));

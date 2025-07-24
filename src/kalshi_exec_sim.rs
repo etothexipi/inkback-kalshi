@@ -104,16 +104,6 @@ impl Engine {
             self.process_event(event, strategy)?;
         }
 
-        // Show final orderbook state for each market
-        println!("\n=== FINAL ORDERBOOK STATES ===");
-        for (ticker, book) in &self.state.books {
-            println!("Final state for {}:", ticker);
-            book.debug_print_top();
-            println!("  (Full book has {} YES levels, {} NO levels)", 
-                    book.yes_level_count(), book.no_level_count());
-        }
-        println!("Processed {} total events ({} deltas)", event_count, delta_count);
-
         // Finalize metrics
         self.state.metrics.calculate_win_rate();
 
@@ -147,7 +137,7 @@ impl Engine {
         let (bid, ask) = self.state.books.get(&ticker)
             .map(|book| book.best_bid_ask())
             .unwrap_or((0, 100));
-            
+        
         let market_data = MarketData {
             ts: event_ts,
             ticker: ticker.clone(),

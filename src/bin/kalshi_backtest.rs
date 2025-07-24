@@ -84,7 +84,7 @@ fn main() -> Result<()> {
                 .default_value("5"),
         )
         .arg(
-            Arg::new("min_spread")
+            Arg::new("min-spread")
                 .long("min-spread")
                 .value_name("CENTS")
                 .help("Minimum spread for market making (cents)")
@@ -99,32 +99,32 @@ fn main() -> Result<()> {
                 .default_value("50"),
         )
         .arg(
-            Arg::new("max_pos")
+            Arg::new("max-pos")
                 .long("max-pos")
                 .value_name("SIZE")
                 .help("Maximum position size")
                 .default_value("200"),
         )
         .arg(
-            Arg::new("list_files")
+            Arg::new("list-files")
                 .long("list-files")
                 .help("List available data file pairs and exit")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("list_markets")
+            Arg::new("list-markets")
                 .long("list-markets")
                 .help("List available market tickers in the data files and exit")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("all_markets")
+            Arg::new("all-markets")
                 .long("all-markets")
                 .help("Run backtest on all markets found in the data files")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("summary_only")
+            Arg::new("summary-only")
                 .long("summary-only")
                 .help("Show only aggregated summary, skip individual market details")
                 .action(clap::ArgAction::SetTrue),
@@ -137,13 +137,13 @@ fn main() -> Result<()> {
     let market_prefix = matches.get_one::<String>("prefix");
     let strategy_type = matches.get_one::<String>("strategy").unwrap();
     let latency_ms: u64 = matches.get_one::<String>("latency").unwrap().parse()?;
-    let min_spread: u8 = matches.get_one::<String>("min_spread").unwrap().parse()?;
+    let min_spread: u8 = matches.get_one::<String>("min-spread").unwrap().parse()?;
     let qty: i64 = matches.get_one::<String>("qty").unwrap().parse()?;
-    let max_pos: i64 = matches.get_one::<String>("max_pos").unwrap().parse()?;
-    let list_files = matches.get_flag("list_files");
-    let list_markets = matches.get_flag("list_markets");
-    let all_markets = matches.get_flag("all_markets");
-    let summary_only = matches.get_flag("summary_only");
+    let max_pos: i64 = matches.get_one::<String>("max-pos").unwrap().parse()?;
+    let list_files = matches.get_flag("list-files");
+    let list_markets = matches.get_flag("list-markets");
+    let all_markets = matches.get_flag("all-markets");
+    let summary_only = matches.get_flag("summary-only");
 
     // Verify data directory exists
     if !Path::new(data_dir).exists() {

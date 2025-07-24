@@ -43,7 +43,10 @@ impl<R: Read> Iterator for OrderbookIterator<R> {
     fn next(&mut self) -> Option<Self::Item> {
         let mut record = csv::StringRecord::new();
         match self.reader.read_record(&mut record) {
-            Ok(true) => Some(self.parse_orderbook_record(&record)),
+            Ok(true) => {
+                let result = self.parse_orderbook_record(&record);
+                Some(result)
+            },
             Ok(false) => None,
             Err(e) => Some(Err(e.into())),
         }

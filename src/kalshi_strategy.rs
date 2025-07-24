@@ -71,9 +71,23 @@ impl SpreadMmStrategy {
 
     /// Calculate optimal bid/ask prices based on current market and position
     fn calculate_quotes(&self, market_bid: u8, market_ask: u8) -> Option<(u8, u8)> {
+        // Don't make markets in uninitialized/fake conditions
+        if market_bid == 0 || market_ask == 100 {
+            return None;
+        }
+
+        // Don't make markets when spread is unrealistically wide (>20 cents)
         let spread = market_ask.saturating_sub(market_bid);
+        if spread > 20 {
+            return None;
+        }
+
+        // Don't make markets at extreme prices - only allow exits
+        if market_bid >= 99 || market_ask <= 1 {
+            return None;
+        }
         
-        // Only quote if spread is wide enough
+        // Only quote if market spread is wide enough (min_spread must be >= 3)
         if spread < self.params.min_spread {
             return None;
         }
@@ -82,8 +96,20 @@ impl SpreadMmStrategy {
         let our_bid = market_bid + 1;
         let our_ask = market_ask - 1;
 
-        // Ensure our quotes maintain minimum spread
-        if our_ask.saturating_sub(our_bid) < self.params.min_spread {
+        // Don't place bids that could get filled at extreme prices
+        // If our_bid >= 99, it would get filled when market crashes to 1¢
+        if our_bid >= 99 {
+            return None;
+        }
+
+        // Don't place asks that could get filled at extreme prices  
+        // If our_ask <= 1, it would get filled when market spikes to 99¢
+        if our_ask <= 1 {
+            return None;
+        }
+
+        // Ensure our internal quotes maintain at least 1 cent spread
+        if our_ask.saturating_sub(our_bid) < 1 {
             return None;
         }
 
