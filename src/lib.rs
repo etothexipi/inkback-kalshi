@@ -6,6 +6,7 @@ pub mod kalshi_l2_book;
 pub mod kalshi_strategy;
 pub mod kalshi_exec_sim;
 pub mod kalshi_backtest;
+pub mod kalshi_viz;
 
 // Re-export commonly used items for convenience
 pub use kalshi_backtest::{KalshiBacktest, calculate_performance_metrics};

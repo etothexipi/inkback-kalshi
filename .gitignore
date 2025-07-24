@@ -9,3 +9,6 @@
 
 # keys
 *.pem
+
+# logs
+*.log

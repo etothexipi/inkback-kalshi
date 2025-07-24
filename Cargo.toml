@@ -3,6 +3,14 @@ name = "InkBack"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "kalshi_backtest"
+path = "src/bin/kalshi_backtest.rs"
+
+[[bin]]
+name = "kalshi_visualizer"
+path = "src/bin/kalshi_visualizer.rs"
+
 [dependencies]
 databento = "0.8.0"
 time = "0.3"
