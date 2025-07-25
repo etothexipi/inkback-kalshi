@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::time::Duration;
 use std::path::{Path, PathBuf};
 use InkBack::{
-    SpreadMmStrategy, SpreadMmParams, DirectionalStrategy, 
+    SpreadMmStrategy, SpreadMmParams, DirectionalStrategy, TrailingMmStrategy, TrailingMmParams,
     SimConfig, Side, kalshi_types::*, kalshi_strategy::KalshiStrategy,
     kalshi_csv_io::*, kalshi_event_stream::*, kalshi_exec_sim::run_backtest
 };
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
                 .long("strategy")
                 .short('s')
                 .value_name("STRATEGY")
-                .help("Strategy type: spread_mm, directional_yes, directional_no")
+                .help("Strategy type: spread_mm, trailing_spread_mm, directional_yes, directional_no")
                 .default_value("spread_mm"),
         )
         .arg(
@@ -190,6 +190,17 @@ fn run_visualization_backtest(
             };
             Box::new(SpreadMmStrategy::new(params))
         }
+        "trailing_spread_mm" => {
+            let params = TrailingMmParams {
+                min_spread_for_trailing: min_spread.max(3), // Ensure minimum for trailing
+                trail_distance: 2,
+                max_position: max_pos,
+                quote_quantity: qty,
+                order_ttl: Duration::from_secs(3),
+                min_move_for_replace: 1,
+            };
+            Box::new(TrailingMmStrategy::new(params))
+        }
         "directional_yes" => {
             Box::new(DirectionalStrategy::new(Side::Yes, qty, 60))
         }
@@ -197,7 +208,7 @@ fn run_visualization_backtest(
             Box::new(DirectionalStrategy::new(Side::No, qty, 40))
         }
         _ => {
-            anyhow::bail!("Unknown strategy: {}. Use spread_mm, directional_yes, or directional_no", strategy_type);
+            anyhow::bail!("Unknown strategy: {}. Use spread_mm, trailing_spread_mm, directional_yes, or directional_no", strategy_type);
         }
     };
 

@@ -284,7 +284,8 @@ where
 mod tests {
     use super::*;
     use crate::kalshi_types::{RawObRow, RawTradeRow};
-
+    use crate::Side;
+    
     #[test]
     fn test_event_ordering() {
         let orderbook_rows = vec![

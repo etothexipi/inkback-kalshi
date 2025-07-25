@@ -6,7 +6,7 @@ use std::fs;
 use std::collections::HashSet;
 use csv::ReaderBuilder;
 
-use InkBack::{KalshiBacktest, calculate_performance_metrics, SpreadMmStrategy, SpreadMmParams, DirectionalStrategy, SimConfig, Side};
+use InkBack::{KalshiBacktest, calculate_performance_metrics, SpreadMmStrategy, SpreadMmParams, DirectionalStrategy, TrailingMmStrategy, TrailingMmParams, SimConfig, Side};
 
 #[derive(Debug, Clone)]
 struct MarketResult {
@@ -72,7 +72,7 @@ fn main() -> Result<()> {
                 .long("strategy")
                 .short('s')
                 .value_name("STRATEGY")
-                .help("Strategy type: spread_mm, directional_yes, directional_no")
+                .help("Strategy type: spread_mm, trailing_spread_mm, directional_yes, directional_no")
                 .default_value("spread_mm"),
         )
         .arg(
@@ -514,6 +514,18 @@ fn run_backtest_for_market(
             let mut strategy = SpreadMmStrategy::new(params);
             backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)
         }
+        "trailing_spread_mm" => {
+            let params = TrailingMmParams {
+                min_spread_for_trailing: min_spread.max(3), // Ensure minimum for trailing
+                trail_distance: 2,
+                max_position: max_pos,
+                quote_quantity: qty,
+                order_ttl: Duration::from_secs(3),
+                min_move_for_replace: 1,
+            };
+            let mut strategy = TrailingMmStrategy::new(params);
+            backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)
+        }
         "directional_yes" => {
             let mut strategy = DirectionalStrategy::new(Side::Yes, qty, 60);
             backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)
@@ -523,7 +535,7 @@ fn run_backtest_for_market(
             backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)
         }
         _ => {
-            anyhow::bail!("Unknown strategy: {}. Use spread_mm, directional_yes, or directional_no", strategy_type);
+            anyhow::bail!("Unknown strategy: {}. Use spread_mm, trailing_spread_mm, directional_yes, or directional_no", strategy_type);
         }
     };
 

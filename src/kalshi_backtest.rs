@@ -216,8 +216,8 @@ mod tests {
 
         let mut strategy = SpreadMmStrategy::new(SpreadMmParams {
             min_spread: 2,
-            post_qty: 50,
-            max_pos: 200,
+            quote_quantity: 50,
+            max_position: 200,
             order_ttl: Duration::from_secs(5),
         });
 

@@ -542,6 +542,9 @@ mod tests {
                 }]
             }
             fn on_fill(&mut self, _fill: &Fill) {}
+            fn as_any(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
         }
 
         let mut strategy = TestStrategy;
@@ -591,6 +594,9 @@ mod tests {
             }
             fn on_fill(&mut self, fill: &Fill) {
                 println!("Received fill: {:?}", fill);
+            }
+            fn as_any(&mut self) -> &mut dyn std::any::Any {
+                self
             }
         }
 

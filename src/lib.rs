@@ -10,5 +10,5 @@ pub mod kalshi_viz;
 
 // Re-export commonly used items for convenience
 pub use kalshi_backtest::{KalshiBacktest, calculate_performance_metrics};
-pub use kalshi_strategy::{KalshiStrategy, SpreadMmStrategy, SpreadMmParams, DirectionalStrategy};
+pub use kalshi_strategy::{KalshiStrategy, SpreadMmStrategy, SpreadMmParams, DirectionalStrategy, TrailingMmStrategy, TrailingMmParams};
 pub use kalshi_types::{SimConfig, Side}; 
