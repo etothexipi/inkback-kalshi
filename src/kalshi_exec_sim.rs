@@ -192,7 +192,12 @@ impl Engine {
         };
 
         let instructions = strategy.on_book(&market_data);
-        self.process_order_instructions(instructions, event_ts)?;
+        let order_mappings = self.process_order_instructions(instructions, event_ts)?;
+        
+        // Notify strategy of assigned order IDs
+        if !order_mappings.is_empty() {
+            strategy.on_orders_created(order_mappings);
+        }
 
         // Step 5: Expire orders
         self.expire_orders(event_ts, strategy);
@@ -346,8 +351,10 @@ impl Engine {
         &mut self,
         instructions: Vec<OrderInstr>,
         current_ts: u64,
-    ) -> Result<()> {
-        for instruction in instructions {
+    ) -> Result<Vec<(usize, OrderId)>> {
+        let mut order_mappings = Vec::new();
+        
+        for (instruction_index, instruction) in instructions.into_iter().enumerate() {
             match instruction {
                 OrderInstr::Limit { side, price, qty, ttl } => {
                     let order_id = self.next_order_id();
@@ -386,6 +393,9 @@ impl Engine {
 
                     self.state.order_audit.push(audit);
                     self.state.metrics.total_orders += 1;
+                    
+                    // Track this order ID mapping
+                    order_mappings.push((instruction_index, order_id));
                 }
                 OrderInstr::Cancel { id } => {
                     // Remove from active orders
@@ -401,7 +411,7 @@ impl Engine {
                 }
             }
         }
-        Ok(())
+        Ok(order_mappings)
     }
 
     fn expire_orders(&mut self, current_ts: u64, _strategy: &mut dyn KalshiStrategy) {
@@ -542,6 +552,7 @@ mod tests {
                 }]
             }
             fn on_fill(&mut self, _fill: &Fill) {}
+            fn on_orders_created(&mut self, _order_mappings: Vec<(usize, OrderId)>) {}
             fn as_any(&mut self) -> &mut dyn std::any::Any {
                 self
             }
@@ -595,6 +606,7 @@ mod tests {
             fn on_fill(&mut self, fill: &Fill) {
                 println!("Received fill: {:?}", fill);
             }
+            fn on_orders_created(&mut self, _order_mappings: Vec<(usize, OrderId)>) {}
             fn as_any(&mut self) -> &mut dyn std::any::Any {
                 self
             }

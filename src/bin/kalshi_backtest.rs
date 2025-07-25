@@ -872,6 +872,20 @@ impl KalshiStrategy for LoggingStrategy {
         self.inner.on_fill(fill);
     }
 
+    fn on_orders_created(&mut self, order_mappings: Vec<(usize, OrderId)>) {
+        // Log order creations
+        if let Ok(mut log) = self.log_writer.try_borrow_mut() {
+            for (instruction_index, order_id) in &order_mappings {
+                let _ = writeln!(log, "ORDER_CREATED: instruction_index={}, assigned_order_id={}",
+                    instruction_index, order_id);
+            }
+            let _ = log.flush();
+        }
+        
+        // Forward to inner strategy
+        self.inner.on_orders_created(order_mappings);
+    }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self.inner.as_any()
     }

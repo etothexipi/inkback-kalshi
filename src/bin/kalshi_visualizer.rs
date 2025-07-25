@@ -315,6 +315,11 @@ impl KalshiStrategy for TrackingStrategy {
         self.inner.on_fill(fill);
     }
 
+    fn on_orders_created(&mut self, order_mappings: Vec<(usize, OrderId)>) {
+        // Forward to inner strategy
+        self.inner.on_orders_created(order_mappings);
+    }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self.inner.as_any()
     }

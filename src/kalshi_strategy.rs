@@ -10,6 +10,10 @@ pub trait KalshiStrategy {
     /// Called when an order is filled
     fn on_fill(&mut self, fill: &Fill);
     
+    /// Called when orders are created by the engine to provide real order IDs
+    /// The vector contains (instruction_index, assigned_order_id) pairs
+    fn on_orders_created(&mut self, order_mappings: Vec<(usize, OrderId)>);
+    
     /// Support for downcasting to concrete strategy types
     fn as_any(&mut self) -> &mut dyn std::any::Any;
 }
@@ -254,6 +258,11 @@ impl KalshiStrategy for SpreadMmStrategy {
         instructions
     }
 
+    fn on_orders_created(&mut self, _order_mappings: Vec<(usize, OrderId)>) {
+        // SpreadMmStrategy doesn't need to track individual order IDs for cancellation
+        // since it uses TTL-based expiration rather than explicit cancellation
+    }
+
     fn on_fill(&mut self, fill: &Fill) {
         // Remove filled order from active orders
         self.active_orders.retain(|&id| id != fill.id);
@@ -403,6 +412,9 @@ pub struct TrailingMmStrategy {
     last_bid_order_price: Option<u8>,
     last_ask_order_price: Option<u8>,
     
+    // Order tracking for proper cancellation
+    pending_order_sides: Vec<Side>, // Track sides of orders we're waiting for IDs for
+    
     // PnL tracking similar to SpreadMmStrategy
     total_pnl_cents: i64,
     order_side_map: HashMap<OrderId, Side>,
@@ -422,6 +434,7 @@ impl TrailingMmStrategy {
             last_ask: None,
             last_bid_order_price: None,
             last_ask_order_price: None,
+            pending_order_sides: Vec::new(),
             total_pnl_cents: 0,
             order_side_map: HashMap::new(),
             avg_cost_basis_cents: 0.0,
@@ -466,6 +479,7 @@ impl TrailingMmStrategy {
         
         self.active_orders.clear();
         self.order_side_map.clear();
+        self.pending_order_sides.clear();
         self.last_bid_order_price = None;
         self.last_ask_order_price = None;
         cancel_orders
@@ -597,9 +611,8 @@ impl KalshiStrategy for TrailingMmStrategy {
         if self.should_quote_side(Side::Yes) && (bid_price_changed || self.active_orders.is_empty()) {
             let qty = self.calculate_quote_quantity(Side::Yes);
             if qty > 0 {
-                let order_id = self.next_order_id();
-                self.active_orders.push(order_id);
-                self.order_side_map.insert(order_id, Side::Yes);
+                // Track that we're placing a YES order (order ID will come from engine)
+                self.pending_order_sides.push(Side::Yes);
                 self.last_bid_order_price = Some(our_bid);
                 
                 instructions.push(OrderInstr::Limit {
@@ -615,9 +628,8 @@ impl KalshiStrategy for TrailingMmStrategy {
         if self.should_quote_side(Side::No) && (ask_price_changed || self.active_orders.is_empty()) {
             let qty = self.calculate_quote_quantity(Side::No);
             if qty > 0 {
-                let order_id = self.next_order_id();
-                self.active_orders.push(order_id);
-                self.order_side_map.insert(order_id, Side::No);
+                // Track that we're placing a NO order (order ID will come from engine)
+                self.pending_order_sides.push(Side::No);
                 self.last_ask_order_price = Some(our_ask);
                 
                 instructions.push(OrderInstr::Limit {
@@ -634,6 +646,19 @@ impl KalshiStrategy for TrailingMmStrategy {
         self.last_ask = Some(md.ask);
 
         instructions
+    }
+
+    fn on_orders_created(&mut self, order_mappings: Vec<(usize, OrderId)>) {
+        // Map instruction indices to real order IDs
+        for (instruction_index, order_id) in order_mappings {
+            if instruction_index < self.pending_order_sides.len() {
+                let side = self.pending_order_sides[instruction_index];
+                self.active_orders.push(order_id);
+                self.order_side_map.insert(order_id, side);
+            }
+        }
+        // Clear pending orders since they've been assigned IDs
+        self.pending_order_sides.clear();
     }
 
     fn on_fill(&mut self, fill: &Fill) {
@@ -796,6 +821,10 @@ impl KalshiStrategy for DirectionalStrategy {
             qty: order_qty,
             ttl: self.order_ttl,
         }]
+    }
+
+    fn on_orders_created(&mut self, _order_mappings: Vec<(usize, OrderId)>) {
+        // DirectionalStrategy doesn't need to track order IDs since it doesn't cancel orders
     }
 
     fn on_fill(&mut self, fill: &Fill) {
