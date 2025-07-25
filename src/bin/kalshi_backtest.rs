@@ -7,6 +7,10 @@ use std::collections::HashSet;
 use csv::ReaderBuilder;
 
 use InkBack::{KalshiBacktest, calculate_performance_metrics, SpreadMmStrategy, SpreadMmParams, DirectionalStrategy, TrailingMmStrategy, TrailingMmParams, SimConfig, Side};
+use InkBack::{kalshi_types::*, kalshi_strategy::KalshiStrategy, kalshi_csv_io::*, kalshi_event_stream::*, kalshi_exec_sim::run_backtest};
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::io::Write;
 
 #[derive(Debug, Clone)]
 struct MarketResult {
@@ -129,6 +133,12 @@ fn main() -> Result<()> {
                 .help("Show only aggregated summary, skip individual market details")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("debug-log")
+                .long("debug-log")
+                .help("Enable debug logging to kalshi_debug.log with chronological event details")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let data_dir = matches.get_one::<String>("data").unwrap();
@@ -144,6 +154,7 @@ fn main() -> Result<()> {
     let list_markets = matches.get_flag("list-markets");
     let all_markets = matches.get_flag("all-markets");
     let summary_only = matches.get_flag("summary-only");
+    let debug_log = matches.get_flag("debug-log");
 
     // Verify data directory exists
     if !Path::new(data_dir).exists() {
@@ -257,6 +268,7 @@ fn main() -> Result<()> {
             min_spread,
             qty,
             max_pos,
+            debug_log,
         );
 
         match result {
@@ -495,15 +507,29 @@ fn run_backtest_for_market(
     min_spread: u8,
     qty: i64,
     max_pos: i64,
+    debug_log: bool,
 ) -> Result<InkBack::kalshi_types::Report> {
     // Create filtered CSV files for this specific market
     let temp_orderbook = create_filtered_csv(orderbook_path, market_ticker, "orderbook")?;
     let temp_trades = create_filtered_csv(trades_path, market_ticker, "trades")?;
 
-    let backtest = KalshiBacktest::new(config.clone());
-
-    // Create strategy based on user input
-    let result = match strategy_type {
+    // Choose between debug logging backtest and regular backtest
+    let result = if debug_log {
+        run_backtest_with_debug_logging(
+            &temp_orderbook,
+            &temp_trades,
+            market_ticker,
+            config,
+            strategy_type,
+            min_spread,
+            qty,
+            max_pos,
+        )
+    } else {
+        let backtest = KalshiBacktest::new(config.clone());
+        
+        // Create strategy based on user input
+        match strategy_type {
         "spread_mm" => {
             let params = SpreadMmParams {
                 min_spread,
@@ -536,6 +562,7 @@ fn run_backtest_for_market(
         }
         _ => {
             anyhow::bail!("Unknown strategy: {}. Use spread_mm, trailing_spread_mm, directional_yes, or directional_no", strategy_type);
+        }
         }
     };
 
@@ -673,5 +700,179 @@ fn extract_timestamp_pattern(filename: &str) -> Option<String> {
         Some(timestamp_parts.join("_").replace(".csv", ""))
     } else {
         None
+    }
+} 
+
+/// Run backtest with debug logging for chronological event analysis
+fn run_backtest_with_debug_logging(
+    orderbook_path: &str,
+    trades_path: &str,
+    market_ticker: &str,
+    config: &SimConfig,
+    strategy_type: &str,
+    min_spread: u8,
+    qty: i64,
+    max_pos: i64,
+) -> Result<Report> {
+    println!("📝 Debug logging enabled - writing to kalshi_debug.log");
+    
+    // Create strategy based on user input
+    let strategy: Box<dyn KalshiStrategy> = match strategy_type {
+        "spread_mm" => {
+            let params = SpreadMmParams {
+                min_spread,
+                quote_quantity: qty,
+                max_position: max_pos,
+                order_ttl: Duration::from_secs(5),
+            };
+            Box::new(SpreadMmStrategy::new(params))
+        }
+        "trailing_spread_mm" => {
+            let params = TrailingMmParams {
+                min_spread_for_trailing: min_spread.max(3),
+                trail_distance: 2,
+                max_position: max_pos,
+                quote_quantity: qty,
+                order_ttl: Duration::from_secs(3),
+                min_move_for_replace: 1,
+            };
+            Box::new(TrailingMmStrategy::new(params))
+        }
+        "directional_yes" => {
+            Box::new(DirectionalStrategy::new(Side::Yes, qty, 60))
+        }
+        "directional_no" => {
+            Box::new(DirectionalStrategy::new(Side::No, qty, 40))
+        }
+        _ => {
+            anyhow::bail!("Unknown strategy: {}. Use spread_mm, trailing_spread_mm, directional_yes, or directional_no", strategy_type);
+        }
+    };
+
+    // Create the event stream
+    let orderbook_iter = parse_orderbook(orderbook_path)?;
+    let trades_iter = parse_trades(trades_path)?;
+    let event_stream = merge(orderbook_iter, trades_iter);
+    
+    // Create a shared log file
+    let log_file = std::fs::File::create("kalshi_debug.log")?;
+    let log_writer = Rc::new(RefCell::new(log_file));
+    
+    // Write header to log
+    {
+        let mut log = log_writer.borrow_mut();
+        writeln!(log, "=== KALSHI BACKTEST DEBUG LOG ===")?;
+        writeln!(log, "Market: {}", market_ticker)?;
+        writeln!(log, "Strategy: {}", strategy_type)?;
+        writeln!(log, "Events logged in strict chronological order by timestamp...\n")?;
+    }
+    
+    let log_writer_clone = log_writer.clone();
+    
+    // Create logging wrapper for events
+    let logged_events = event_stream.map(move |event_result| {
+        event_result.map(|event| {
+            // Log all events as they're processed in chronological order
+            if let Ok(mut log) = log_writer_clone.try_borrow_mut() {
+                match &event {
+                    Event::Snapshot { seq, ts, ticker, yes_levels, no_levels } => {
+                        let _ = writeln!(log, "SNAPSHOT: ts={}, seq={}, ticker={}, yes_levels={:?}, no_levels={:?}",
+                            ts, seq, ticker, yes_levels, no_levels);
+                    }
+                    Event::Delta { seq, ts, ticker, side, price, delta } => {
+                        let _ = writeln!(log, "DELTA: ts={}, seq={}, ticker={}, side={:?}, price={}¢, delta={}",
+                            ts, seq, ticker, side, price, delta);
+                    }
+                    Event::Trade { seq, ts, ticker, yes_price, no_price, qty, taker } => {
+                        let _ = writeln!(log, "TRADE: ts={}, seq={}, ticker={}, yes_price={}¢, no_price={}¢, qty={}, taker={:?}",
+                            ts, seq, ticker, yes_price, no_price, qty, taker);
+                    }
+                }
+                let _ = log.flush();
+            }
+            event
+        })
+    });
+    
+    // Create logging wrapper for strategy
+    let mut logging_strategy = LoggingStrategy::new(strategy, log_writer);
+    
+    // Run the backtest
+    let result = run_backtest(config.clone(), &mut logging_strategy, logged_events)?;
+    
+    // Write summary to log
+    {
+        let mut log = logging_strategy.log_writer.borrow_mut();
+        writeln!(log, "\n=== BACKTEST SUMMARY ===")?;
+        writeln!(log, "Total orders: {}", result.metrics.total_orders)?;
+        writeln!(log, "Total fills: {}", result.metrics.total_fills)?;
+        writeln!(log, "Cancelled orders: {}", result.metrics.cancelled_orders)?;
+        writeln!(log, "Expired orders: {}", result.metrics.expired_orders)?;
+        writeln!(log, "\nDebug log complete.")?;
+    }
+    
+    Ok(result)
+}
+
+/// Wrapper strategy that logs all actions in chronological order
+struct LoggingStrategy {
+    inner: Box<dyn KalshiStrategy>,
+    log_writer: Rc<RefCell<std::fs::File>>,
+}
+
+impl LoggingStrategy {
+    fn new(strategy: Box<dyn KalshiStrategy>, log_writer: Rc<RefCell<std::fs::File>>) -> Self {
+        Self {
+            inner: strategy,
+            log_writer,
+        }
+    }
+}
+
+impl KalshiStrategy for LoggingStrategy {
+    fn on_book(&mut self, md: &MarketData) -> Vec<OrderInstr> {
+        // Log orderbook update
+        if let Ok(mut log) = self.log_writer.try_borrow_mut() {
+            let _ = writeln!(log, "BOOK_UPDATE: ts={}, ticker={}, bid={}¢, ask={}¢, spread={}¢",
+                md.ts, md.ticker, md.bid, md.ask, md.ask.saturating_sub(md.bid));
+            let _ = log.flush();
+        }
+        
+        // Get strategy instructions
+        let instructions = self.inner.on_book(md);
+        
+        // Log strategy actions
+        for instr in &instructions {
+            if let Ok(mut log) = self.log_writer.try_borrow_mut() {
+                match instr {
+                    OrderInstr::Limit { side, price, qty, .. } => {
+                        let _ = writeln!(log, "STRATEGY_ORDER: ts={}, side={:?}, price={}¢, qty={}",
+                            md.ts, side, price, qty);
+                    }
+                    OrderInstr::Cancel { id } => {
+                        let _ = writeln!(log, "STRATEGY_CANCEL: ts={}, order_id={}", md.ts, id);
+                    }
+                }
+                let _ = log.flush();
+            }
+        }
+        
+        instructions
+    }
+
+    fn on_fill(&mut self, fill: &Fill) {
+        // Log fill
+        if let Ok(mut log) = self.log_writer.try_borrow_mut() {
+            let _ = writeln!(log, "FILL: ts={}, order_id={}, price={}¢, qty={}",
+                fill.ts, fill.id, fill.price, fill.qty);
+            let _ = log.flush();
+        }
+        
+        // Forward to inner strategy
+        self.inner.on_fill(fill);
+    }
+
+    fn as_any(&mut self) -> &mut dyn std::any::Any {
+        self.inner.as_any()
     }
 } 

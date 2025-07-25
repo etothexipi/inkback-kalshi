@@ -45,8 +45,8 @@ impl PartialOrd for OrderedEvent {
 
 impl Ord for OrderedEvent {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // First by seq, then by ts
-        self.seq.cmp(&other.seq).then_with(|| self.ts.cmp(&other.ts))
+        // First by ts (timestamp), then by seq for stability
+        self.ts.cmp(&other.ts).then_with(|| self.seq.cmp(&other.seq))
     }
 }
 
@@ -331,10 +331,10 @@ mod tests {
 
         assert_eq!(events.len(), 3);
         
-        // Events should be ordered by sequence number
-        assert_eq!(events[0].seq(), 1); // Snapshot
-        assert_eq!(events[1].seq(), 2); // Trade
-        assert_eq!(events[2].seq(), 3); // Delta
+        // Events should be ordered by timestamp (chronological order)
+        assert_eq!(events[0].ts(), 1000); // Snapshot
+        assert_eq!(events[1].ts(), 2000); // Trade  
+        assert_eq!(events[2].ts(), 3000); // Delta
 
         // Verify event types
         matches!(events[0], Event::Snapshot { .. });
