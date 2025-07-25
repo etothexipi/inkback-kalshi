@@ -246,11 +246,13 @@ impl Engine {
             Side::Yes => {
                 // YES taker means someone bought YES at yes_price
                 // This can fill NO orders (sell YES) at or below yes_price
+                // (NO orders are willing to sell YES at their limit price)
                 self.process_side_fills(Side::No, yes_price, &mut qty_remaining, ts, strategy, true);
             }
             Side::No => {
                 // NO taker means someone bought NO at no_price  
                 // This can fill YES orders (buy YES) at or above (100 - no_price)
+                // (YES orders are willing to buy YES at their limit price)
                 let effective_yes_price = 100 - no_price;
                 self.process_side_fills(Side::Yes, effective_yes_price, &mut qty_remaining, ts, strategy, false);
             }
@@ -276,11 +278,11 @@ impl Engine {
                 
                 // Check if order price allows for a fill at trade_price
                 if is_at_or_below {
-                    // For NO orders: fill if order price >= trade_price (selling at higher price is better)
-                    order.price >= trade_price
-                } else {
-                    // For YES orders: fill if order price <= trade_price (buying at lower price is better)
+                    // For NO orders (selling YES): fill if order price <= trade_price (we're willing to sell at lower price)
                     order.price <= trade_price
+                } else {
+                    // For YES orders (buying YES): fill if order price >= trade_price (we're willing to buy at higher price)
+                    order.price >= trade_price
                 }
             })
             .map(|(&id, order)| (id, order.clone()))
@@ -288,11 +290,11 @@ impl Engine {
 
         // Sort by price priority (best prices first) and then by order ID for deterministic fills
         if is_at_or_below {
-            // For NO orders, prioritize lower prices (better for the seller)
-            orders_to_fill.sort_by_key(|(id, order)| (order.price, *id));
-        } else {
-            // For YES orders, prioritize higher prices (better for the buyer) 
+            // For NO orders, prioritize higher prices (better for the seller)
             orders_to_fill.sort_by_key(|(id, order)| (std::cmp::Reverse(order.price), *id));
+        } else {
+            // For YES orders, prioritize lower prices (better for the buyer) 
+            orders_to_fill.sort_by_key(|(id, order)| (order.price, *id));
         }
 
         for (order_id, mut order) in orders_to_fill {
@@ -406,6 +408,30 @@ impl Engine {
                         // Update audit trail
                         if let Some(audit) = self.state.order_audit.iter_mut().find(|a| a.id == id) {
                             audit.status = OrderStatus::Cancelled;
+                        }
+                    } else {
+                        // Check if order is in pending queue and remove it
+                        let mut pending_to_remove = Vec::new();
+                        let mut temp_pending = Vec::new();
+                        
+                        // Extract all pending orders
+                        while let Some(Reverse(wrapper)) = self.state.pending.pop() {
+                            if wrapper.order.id == id {
+                                pending_to_remove.push(wrapper.order);
+                                self.state.metrics.cancelled_orders += 1;
+                                
+                                // Update audit trail
+                                if let Some(audit) = self.state.order_audit.iter_mut().find(|a| a.id == id) {
+                                    audit.status = OrderStatus::Cancelled;
+                                }
+                            } else {
+                                temp_pending.push(wrapper);
+                            }
+                        }
+                        
+                        // Restore other pending orders
+                        for wrapper in temp_pending {
+                            self.state.pending.push(Reverse(wrapper));
                         }
                     }
                 }
