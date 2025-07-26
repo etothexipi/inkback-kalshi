@@ -117,46 +117,87 @@ impl Engine {
     
     /// Finalize PnL by settling any remaining positions based on market resolution
     fn finalize_strategy_pnl(&mut self, strategy: &mut dyn KalshiStrategy) {
-        // For SpreadMmStrategy, we need to settle final positions
+        // Handle different strategy types
         if let Some(spread_strategy) = strategy.as_any().downcast_mut::<crate::kalshi_strategy::SpreadMmStrategy>() {
-            // Determine market resolution from final orderbook states
-            for (ticker, book) in &self.state.books {
-                let market_resolved_price = self.determine_market_resolution(book);
-                let settlement_pnl = spread_strategy.settle_final_position(market_resolved_price);
-                
-                // Add settlement PnL to metrics
-                self.state.metrics.gross_pnl_cents += settlement_pnl;
-            }
-            
-            // Get total PnL from strategy (including all round-trips)
-            let total_strategy_pnl = spread_strategy.get_total_pnl_cents(None);
-            
-            // Update metrics with the correct total
-            self.state.metrics.gross_pnl_cents = total_strategy_pnl;
+            self.settle_spread_strategy(spread_strategy);
+        } else if let Some(trailing_strategy) = strategy.as_any().downcast_mut::<crate::kalshi_strategy::TrailingMmStrategy>() {
+            self.settle_trailing_strategy(trailing_strategy);
+        } else if let Some(directional_strategy) = strategy.as_any().downcast_mut::<crate::kalshi_strategy::DirectionalStrategy>() {
+            self.settle_directional_strategy(directional_strategy);
         }
     }
     
+    /// Settle SpreadMmStrategy positions
+    fn settle_spread_strategy(&mut self, strategy: &mut crate::kalshi_strategy::SpreadMmStrategy) {
+        // Determine market resolution from final orderbook states
+        for (ticker, book) in &self.state.books {
+            let market_resolved_price = self.determine_market_resolution(book);
+            let settlement_pnl = strategy.settle_final_position(market_resolved_price);
+            
+            // Add settlement PnL to metrics
+            self.state.metrics.gross_pnl_cents += settlement_pnl;
+        }
+        
+        // Get total PnL from strategy (including all round-trips)
+        let total_strategy_pnl = strategy.get_total_pnl_cents(None);
+        
+        // Update metrics with the correct total
+        self.state.metrics.gross_pnl_cents = total_strategy_pnl;
+    }
+    
+    /// Settle TrailingMmStrategy positions
+    fn settle_trailing_strategy(&mut self, strategy: &mut crate::kalshi_strategy::TrailingMmStrategy) {
+        // Determine market resolution from final orderbook states
+        for (ticker, book) in &self.state.books {
+            let market_resolved_price = self.determine_market_resolution(book);
+            let settlement_pnl = strategy.settle_final_position(market_resolved_price);
+            
+            // Add settlement PnL to metrics
+            self.state.metrics.gross_pnl_cents += settlement_pnl;
+        }
+        
+        // Get total PnL from strategy (including all round-trips)
+        let total_strategy_pnl = strategy.get_total_pnl_cents(None);
+        
+        // Update metrics with the correct total
+        self.state.metrics.gross_pnl_cents = total_strategy_pnl;
+    }
+    
+    /// Settle DirectionalStrategy positions
+    fn settle_directional_strategy(&mut self, strategy: &mut crate::kalshi_strategy::DirectionalStrategy) {
+        // Determine market resolution from final orderbook states
+        for (ticker, book) in &self.state.books {
+            let market_resolved_price = self.determine_market_resolution(book);
+            let settlement_pnl = strategy.settle_final_position(market_resolved_price);
+            
+            // Add settlement PnL to metrics
+            self.state.metrics.gross_pnl_cents += settlement_pnl;
+        }
+        
+        // Get total PnL from strategy (including all round-trips)
+        let total_strategy_pnl = strategy.get_total_pnl_cents(None);
+        
+        // Update metrics with the correct total
+        self.state.metrics.gross_pnl_cents = total_strategy_pnl;
+    }
+    
     /// Determine market resolution based on final orderbook state
+    /// Returns the settlement price for YES contracts (0-100 cents)
     fn determine_market_resolution(&self, book: &crate::kalshi_l2_book::OrderBook) -> u8 {
         let (bid, ask) = book.best_bid_ask();
         
-        // Market resolution logic:
-        // - If bids are at 99¢ and no meaningful asks, YES wins (100¢)
-        // - If asks are at 1¢ and no meaningful bids, NO wins (0¢)
-        // - Otherwise, use mid-price as settlement
+        // Market resolution logic based on user requirements:
+        // - If market ends with YES at 99¢ (bid >= 99), YES wins (settlement = 99¢)
+        // - Otherwise, YES loses (settlement = 0¢)
+        // - This means net longs get 99¢ if YES wins, 0¢ if YES loses
+        // - Net shorts get the opposite: 1¢ if YES wins, 99¢ if YES loses
         
-        if bid >= 99 && ask >= 100 {
-            // YES clearly winning
-            100
-        } else if ask <= 1 && bid == 0 {
-            // NO clearly winning  
-            0
-        } else if bid > 0 && ask < 100 {
-            // Use mid-price for settlement
-            (bid + ask) / 2
+        if bid >= 99 {
+            // YES is winning - settlement price is 99¢ for YES contracts
+            99
         } else {
-            // Default to 50¢ if unclear
-            50
+            // YES is losing - settlement price is 0¢ for YES contracts
+            0
         }
     }
 

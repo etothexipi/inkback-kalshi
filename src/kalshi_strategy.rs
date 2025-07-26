@@ -844,6 +844,54 @@ impl KalshiStrategy for DirectionalStrategy {
     }
 }
 
+impl DirectionalStrategy {
+    /// Get the current PnL including unrealized PnL at given market price
+    pub fn get_total_pnl_cents(&self, current_market_price: Option<u8>) -> i64 {
+        // For directional strategy, we need to track cost basis
+        // This is a simplified implementation - in practice you'd track entry prices
+        if let Some(market_price) = current_market_price {
+            if self.current_position != 0 {
+                // Simplified PnL calculation - assumes average entry around 50¢
+                let avg_entry = 50; // Simplified assumption
+                let pnl = if self.current_position > 0 {
+                    // Long position: PnL = (current_price - entry) * position
+                    (market_price as i64 - avg_entry) * self.current_position
+                } else {
+                    // Short position: PnL = (entry - current_price) * abs(position)
+                    (avg_entry - market_price as i64) * self.current_position.abs()
+                };
+                pnl
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+    
+    /// Settle final position based on market resolution
+    pub fn settle_final_position(&mut self, market_resolved_price: u8) -> i64 {
+        if self.current_position == 0 {
+            return 0;
+        }
+        
+        // Simplified settlement - assumes average entry around 50¢
+        let avg_entry = 50;
+        let settlement_pnl = if self.current_position > 0 {
+            // Long position: PnL = (resolved_price - entry) * position
+            (market_resolved_price as i64 - avg_entry) * self.current_position
+        } else {
+            // Short position: PnL = (entry - resolved_price) * abs(position)
+            (avg_entry - market_resolved_price as i64) * self.current_position.abs()
+        };
+        
+        // Clear position
+        self.current_position = 0;
+        
+        settlement_pnl
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
