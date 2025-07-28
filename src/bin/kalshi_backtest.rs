@@ -1151,14 +1151,8 @@ impl KalshiStrategy for PnlLoggingStrategy {
     }
 
     fn on_fill(&mut self, fill: &Fill) {
-        // We need to determine if this fill was a YES or NO order
-        // Since we don't have direct access to order side info, we'll use a heuristic
-        // but this should ideally come from the strategy's order tracking
-        
-        // For now, let's assume:
-        // - If price < 50¢, this was likely a YES order (buying YES)
-        // - If price >= 50¢, this was likely a NO order (buying NO)
-        let is_yes_order = fill.price < 50;
+        // Use the actual order side from the fill
+        let is_yes_order = fill.side == Side::Yes;
         
         // Log PnL calculation before updating position
         self.log_pnl_update(fill, is_yes_order);

@@ -129,6 +129,7 @@ pub struct Fill {
     pub price: u8,
     pub qty: i64,
     pub ts: u64,
+    pub side: Side,  // The side of the order that was filled
 }
 
 /// Order audit trail

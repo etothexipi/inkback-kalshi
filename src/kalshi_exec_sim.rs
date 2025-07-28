@@ -354,6 +354,7 @@ impl Engine {
                 price: fill_price,
                 qty: fill_qty,
                 ts,
+                side: order.side,
             };
 
             // Update metrics
@@ -522,6 +523,7 @@ impl Engine {
                 price: audit.price,
                 qty: audit.filled_qty,
                 ts: audit.activation_time, // Approximation
+                side: audit.side,
             })
             .collect()
     }
