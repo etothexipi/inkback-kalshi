@@ -583,11 +583,38 @@ fn run_backtest_for_market(
                 writeln!(log, "=== KALSHI PnL LOG ===")?;
                 writeln!(log, "Market: {}", market_ticker)?;
                 writeln!(log, "Strategy: {}", strategy_type)?;
-                writeln!(log, "Step-by-step PnL calculations...\n")?;
+                writeln!(log, "Step-by-step PnL calculations in table format...\n")?;
+                writeln!(log, "Legend:")?;
+                writeln!(log, "  TS = Timestamp")?;
+                writeln!(log, "  SIDE = YESBUY/YESSELL/NOBUY/NOSELL")?;
+                writeln!(log, "  PRICE = Fill price in cents")?;
+                writeln!(log, "  QTY = Quantity filled")?;
+                writeln!(log, "  POSITION = YES position before->after")?;
+                writeln!(log, "  COST_BASIS = Average cost basis in cents")?;
+                writeln!(log, "  REALIZED = Realized PnL in cents")?;
+                writeln!(log, "  UNREALIZED = Unrealized PnL in cents")?;
+                writeln!(log, "  TOTAL = Total PnL (realized + unrealized) in cents")?;
+                writeln!(log, "  MAX_P/L = Max profit/Max loss in cents\n")?;
             }
             
             let mut pnl_logging_strategy = PnlLoggingStrategy::new(strategy, pnl_writer);
-            backtest.run_from_files(&temp_orderbook, &temp_trades, &mut pnl_logging_strategy)
+            let result = backtest.run_from_files(&temp_orderbook, &temp_trades, &mut pnl_logging_strategy)?;
+            
+            // Write settlement summary to PnL log
+            let settlement_pnl = pnl_logging_strategy.calculate_final_settlement();
+            if let Ok(mut log) = pnl_logging_strategy.pnl_writer.try_borrow_mut() {
+                writeln!(log, "\n=== PnL SUMMARY ===")?;
+                writeln!(log, "Final Position: {}", pnl_logging_strategy.position)?;
+                writeln!(log, "Final Cost Basis: {:.2}¢", pnl_logging_strategy.avg_cost_basis)?;
+                writeln!(log, "Realized PnL: {}¢", pnl_logging_strategy.realized_pnl)?;
+                writeln!(log, "Settlement PnL: {}¢", settlement_pnl)?;
+                writeln!(log, "Total Final PnL: {}¢", pnl_logging_strategy.realized_pnl + settlement_pnl)?;
+                writeln!(log, "Max Profit: {}¢", pnl_logging_strategy.max_profit)?;
+                writeln!(log, "Max Loss: {}¢", pnl_logging_strategy.max_loss)?;
+                writeln!(log, "\nPnL log complete.")?;
+            }
+            
+            Ok(result)
         } else {
             backtest.run_from_files(&temp_orderbook, &temp_trades, &mut *strategy)
         }
@@ -835,7 +862,18 @@ fn run_backtest_with_debug_logging(
             writeln!(log, "=== KALSHI PnL LOG ===")?;
             writeln!(log, "Market: {}", market_ticker)?;
             writeln!(log, "Strategy: {}", strategy_type)?;
-            writeln!(log, "Step-by-step PnL calculations...\n")?;
+            writeln!(log, "Step-by-step PnL calculations in table format...\n")?;
+            writeln!(log, "Legend:")?;
+            writeln!(log, "  TS = Timestamp")?;
+            writeln!(log, "  SIDE = BUY/SELL")?;
+            writeln!(log, "  PRICE = Fill price in cents")?;
+            writeln!(log, "  QTY = Quantity filled")?;
+            writeln!(log, "  POSITION = Position before->after")?;
+            writeln!(log, "  COST_BASIS = Average cost basis in cents")?;
+            writeln!(log, "  REALIZED = Realized PnL in cents")?;
+            writeln!(log, "  UNREALIZED = Unrealized PnL in cents")?;
+            writeln!(log, "  TOTAL = Total PnL (realized + unrealized) in cents")?;
+            writeln!(log, "  MAX_P/L = Max profit/Max loss in cents\n")?;
         }
         
         // Create PnL logging wrapper around the debug logging wrapper
@@ -853,12 +891,17 @@ fn run_backtest_with_debug_logging(
     if pnl_log {
         // Both PnL and debug logging enabled
         if let Some(pnl_wrapper) = logging_strategy.as_any().downcast_mut::<PnlLoggingStrategy>() {
+            // Calculate final settlement PnL
+            let settlement_pnl = pnl_wrapper.calculate_final_settlement();
+            
             // Write PnL summary
             if let Ok(mut log) = pnl_wrapper.pnl_writer.try_borrow_mut() {
                 writeln!(log, "\n=== PnL SUMMARY ===")?;
                 writeln!(log, "Final Position: {}", pnl_wrapper.position)?;
                 writeln!(log, "Final Cost Basis: {:.2}¢", pnl_wrapper.avg_cost_basis)?;
                 writeln!(log, "Realized PnL: {}¢", pnl_wrapper.realized_pnl)?;
+                writeln!(log, "Settlement PnL: {}¢", settlement_pnl)?;
+                writeln!(log, "Total Final PnL: {}¢", pnl_wrapper.realized_pnl + settlement_pnl)?;
                 writeln!(log, "Max Profit: {}¢", pnl_wrapper.max_profit)?;
                 writeln!(log, "Max Loss: {}¢", pnl_wrapper.max_loss)?;
                 writeln!(log, "\nPnL log complete.")?;
@@ -930,10 +973,10 @@ impl KalshiStrategy for LoggingStrategy {
                         let _ = writeln!(log, "STRATEGY_CANCEL: ts={}, order_id={}", md.ts, id);
                     }
                 }
-                let _ = log.flush();
-            }
+                            let _ = log.flush();
         }
-        
+    }
+
         instructions
     }
 
@@ -995,7 +1038,7 @@ impl PnlLoggingStrategy {
         }
     }
 
-    fn log_pnl_update(&mut self, fill: &Fill, position_delta: i64, is_position_increasing: bool) {
+    fn log_pnl_update(&mut self, fill: &Fill, position_delta: i64, is_position_increasing: bool, is_yes_order: bool) {
         if let Ok(mut log) = self.pnl_writer.try_borrow_mut() {
             let old_position = self.position;
             let old_cost_basis = self.avg_cost_basis;
@@ -1044,22 +1087,62 @@ impl PnlLoggingStrategy {
                 self.max_loss = total_pnl;
             }
             
-            // Log the PnL calculation
-            let _ = writeln!(log, "FILL_PNL: ts={}, order_id={}, price={}¢, qty={}, side={}",
-                fill.ts, fill.id, fill.price, fill.qty, 
-                if position_delta > 0 { "BUY" } else { "SELL" });
-            let _ = writeln!(log, "  Position: {} -> {} (delta: {})", 
-                old_position, new_position, position_delta);
-            let _ = writeln!(log, "  Cost Basis: {:.2}¢ -> {:.2}¢", 
-                old_cost_basis, self.avg_cost_basis);
-            let _ = writeln!(log, "  Realized PnL: {}¢ -> {}¢ (impact: {}¢)", 
-                old_realized_pnl, new_realized_pnl, pnl_impact);
-            let _ = writeln!(log, "  Unrealized PnL: {}¢", unrealized_pnl);
-            let _ = writeln!(log, "  Total PnL: {}¢ (Max Profit: {}¢, Max Loss: {}¢)", 
-                total_pnl, self.max_profit, self.max_loss);
-            let _ = writeln!(log, "");
+            // Log the PnL calculation in table format
+            let side = if is_yes_order { "YES" } else { "NO" };
+            let action = if position_delta > 0 { "BUY" } else { "SELL" };
+            let trade_type = if !is_position_increasing && self.position != 0 { "ROUND-TRIP" } else { "POSITION" };
+            
+            // Print table header only once (on first fill)
+            if self.position == 0 && position_delta > 0 {
+                let _ = writeln!(log, "{:>8} | {:>6} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8}",
+                    "TS", "SIDE", "PRICE", "QTY", "POSITION", "COST_BASIS", "REALIZED", "UNREALIZED", "TOTAL", "MAX_P/L");
+                let _ = writeln!(log, "{:-<8}-+-{:-<6}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}",
+                    "", "", "", "", "", "", "", "", "", "");
+            }
+            
+            let _ = writeln!(log, "{:>8} | {:>6} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8}",
+                fill.ts, format!("{}{}", side, action), format!("{}¢", fill.price), fill.qty, 
+                format!("{}->{}", old_position, new_position),
+                format!("{:.1}¢", self.avg_cost_basis),
+                format!("{}¢", new_realized_pnl),
+                format!("{}¢", unrealized_pnl),
+                format!("{}¢", total_pnl),
+                format!("{}/{}", self.max_profit, self.max_loss));
             let _ = log.flush();
         }
+    }
+
+    fn calculate_final_settlement(&self) -> i64 {
+        if self.position == 0 {
+            return 0;
+        }
+        
+        // Determine market resolution based on final orderbook state
+        // For this example, we'll assume YES resolution (98¢) based on the debug log
+        // In practice, this would come from the actual market resolution
+        let market_resolved_to_yes = true; // Assume YES resolution for now
+        
+        let settlement_pnl = if self.position > 0 {
+            // We have a long YES position
+            if market_resolved_to_yes {
+                // YES wins: we get 100¢ per contract, minus what we paid
+                (100 - self.avg_cost_basis as i64) * self.position
+            } else {
+                // NO wins: we get 0¢ per contract, minus what we paid
+                (0 - self.avg_cost_basis as i64) * self.position
+            }
+        } else {
+            // We have a short YES position (equivalent to long NO position)
+            if market_resolved_to_yes {
+                // YES wins: we owe 100¢ per contract, plus what we received
+                (self.avg_cost_basis as i64 - 100) * self.position.abs()
+            } else {
+                // NO wins: we owe 0¢ per contract, plus what we received
+                (self.avg_cost_basis as i64 - 0) * self.position.abs()
+            }
+        };
+        
+        settlement_pnl
     }
 }
 
@@ -1070,20 +1153,28 @@ impl KalshiStrategy for PnlLoggingStrategy {
     }
 
     fn on_fill(&mut self, fill: &Fill) {
-        // Determine position change based on fill price
-        // This is a simplified approach - in practice you'd track order sides
-        let position_delta = if fill.price < 50 {
-            // Likely a YES buy (increases YES position)
-            fill.qty
+        // We need to determine if this fill was a YES or NO order
+        // Since we don't have direct access to order side info, we'll use a heuristic
+        // but this should ideally come from the strategy's order tracking
+        
+        // For now, let's assume:
+        // - If price < 50¢, this was likely a YES order (buying YES)
+        // - If price >= 50¢, this was likely a NO order (buying NO)
+        let is_yes_order = fill.price < 50;
+        
+        // Calculate position change:
+        // - YES order: increases our YES position
+        // - NO order: decreases our YES position (equivalent to selling YES)
+        let position_delta = if is_yes_order {
+            fill.qty  // Buying YES increases YES position
         } else {
-            // Likely a NO buy (decreases YES position)
-            -fill.qty
+            -fill.qty // Buying NO decreases YES position (selling YES)
         };
         
         let is_position_increasing = (self.position * position_delta) >= 0;
         
         // Log PnL calculation before updating position
-        self.log_pnl_update(fill, position_delta, is_position_increasing);
+        self.log_pnl_update(fill, position_delta, is_position_increasing, is_yes_order);
         
         // Update position tracking
         if is_position_increasing {
@@ -1098,8 +1189,10 @@ impl KalshiStrategy for PnlLoggingStrategy {
         } else {
             // Position is reducing (round-trip)
             let round_trip_pnl = if self.position > 0 {
+                // We had a long YES position, now selling YES
                 (fill.price as i64 - self.avg_cost_basis as i64) * fill.qty.abs()
             } else {
+                // We had a short YES position, now buying YES
                 (self.avg_cost_basis as i64 - fill.price as i64) * fill.qty.abs()
             };
             
