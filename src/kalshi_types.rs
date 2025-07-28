@@ -5,7 +5,7 @@ use std::time::Duration;
 pub type OrderId = u64;
 
 /// Side of the market
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     Yes,
     No,

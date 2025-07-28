@@ -604,8 +604,8 @@ fn run_backtest_for_market(
             let settlement_pnl = pnl_logging_strategy.calculate_final_settlement();
             if let Ok(mut log) = pnl_logging_strategy.pnl_writer.try_borrow_mut() {
                 writeln!(log, "\n=== PnL SUMMARY ===")?;
-                writeln!(log, "Final Position: {}", pnl_logging_strategy.position)?;
-                writeln!(log, "Final Cost Basis: {:.2}¢", pnl_logging_strategy.avg_cost_basis)?;
+                writeln!(log, "Final Position: {}", pnl_logging_strategy.net_yes_position)?;
+                writeln!(log, "Final Cost Basis: {:.2}¢", pnl_logging_strategy.total_cash_flow)?;
                 writeln!(log, "Realized PnL: {}¢", pnl_logging_strategy.realized_pnl)?;
                 writeln!(log, "Settlement PnL: {}¢", settlement_pnl)?;
                 writeln!(log, "Total Final PnL: {}¢", pnl_logging_strategy.realized_pnl + settlement_pnl)?;
@@ -897,8 +897,8 @@ fn run_backtest_with_debug_logging(
             // Write PnL summary
             if let Ok(mut log) = pnl_wrapper.pnl_writer.try_borrow_mut() {
                 writeln!(log, "\n=== PnL SUMMARY ===")?;
-                writeln!(log, "Final Position: {}", pnl_wrapper.position)?;
-                writeln!(log, "Final Cost Basis: {:.2}¢", pnl_wrapper.avg_cost_basis)?;
+                writeln!(log, "Final Position: {}", pnl_wrapper.net_yes_position)?;
+                writeln!(log, "Final Cost Basis: {:.2}¢", pnl_wrapper.total_cash_flow)?;
                 writeln!(log, "Realized PnL: {}¢", pnl_wrapper.realized_pnl)?;
                 writeln!(log, "Settlement PnL: {}¢", settlement_pnl)?;
                 writeln!(log, "Total Final PnL: {}¢", pnl_wrapper.realized_pnl + settlement_pnl)?;
@@ -1015,11 +1015,10 @@ impl KalshiStrategy for LoggingStrategy {
 struct PnlLoggingStrategy {
     inner: Box<dyn KalshiStrategy>,
     pnl_writer: Rc<RefCell<std::fs::File>>,
-    // Track position and cost basis for PnL calculations
-    position: i64,
-    total_cost: i64,
-    avg_cost_basis: f64,
-    realized_pnl: i64,
+    // Simplified PnL tracking for binary contracts
+    net_yes_position: i64,      // Net YES position (positive = long YES, negative = short YES)
+    total_cash_flow: i64,       // Total money we've paid/received
+    realized_pnl: i64,          // Realized PnL from completed round trips
     max_profit: i64,
     max_loss: i64,
 }
@@ -1029,55 +1028,55 @@ impl PnlLoggingStrategy {
         Self {
             inner: strategy,
             pnl_writer,
-            position: 0,
-            total_cost: 0,
-            avg_cost_basis: 0.0,
+            net_yes_position: 0,
+            total_cash_flow: 0,
             realized_pnl: 0,
             max_profit: 0,
             max_loss: 0,
         }
     }
 
-    fn log_pnl_update(&mut self, fill: &Fill, position_delta: i64, is_position_increasing: bool, is_yes_order: bool) {
+    fn log_pnl_update(&mut self, fill: &Fill, is_yes_order: bool) {
         if let Ok(mut log) = self.pnl_writer.try_borrow_mut() {
-            let old_position = self.position;
-            let old_cost_basis = self.avg_cost_basis;
-            let old_realized_pnl = self.realized_pnl;
+            let old_position = self.net_yes_position;
+            let old_cash_flow = self.total_cash_flow;
             
-            // Calculate new position
-            let new_position = self.position + position_delta;
+            // Calculate cash flow for this fill
+            let cash_flow = fill.price as i64 * fill.qty;
             
-            // Calculate PnL impact
-            let pnl_impact = if !is_position_increasing && self.position != 0 {
-                // This is a round-trip trade (reducing position)
-                let round_trip_pnl = if self.position > 0 {
-                    // Long position being reduced: PnL = (exit_price - cost_basis) * qty
-                    (fill.price as i64 - self.avg_cost_basis as i64) * position_delta.abs()
-                } else {
-                    // Short position being reduced: PnL = (cost_basis - exit_price) * qty
-                    (self.avg_cost_basis as i64 - fill.price as i64) * position_delta.abs()
-                };
-                round_trip_pnl
+            // Update position and cash flow
+            if is_yes_order {
+                // YES order filled - increases our YES position
+                self.net_yes_position += fill.qty;
+                self.total_cash_flow -= cash_flow; // We paid money to buy YES
             } else {
-                0
-            };
+                // NO order filled - decreases our YES position (equivalent to selling YES)
+                self.net_yes_position -= fill.qty;
+                self.total_cash_flow += cash_flow; // We received money for selling YES
+            }
             
-            let new_realized_pnl = self.realized_pnl + pnl_impact;
+            // Calculate realized PnL if this completes a round trip
+            if self.net_yes_position == 0 && self.realized_pnl == 0 {
+                // If we're back to zero position, all PnL is realized
+                self.realized_pnl = -self.total_cash_flow;
+            }
             
             // Calculate unrealized PnL at current market price (using fill price as proxy)
-            let unrealized_pnl = if new_position != 0 {
-                if new_position > 0 {
-                    // Long position: unrealized = (current_price - cost_basis) * position
-                    (fill.price as i64 - self.avg_cost_basis as i64) * new_position
+            let unrealized_pnl = if self.net_yes_position != 0 {
+                // Simplified: assume average entry around 50¢
+                let avg_entry = 50;
+                if self.net_yes_position > 0 {
+                    // Long position: unrealized = (current_price - entry) * position
+                    (fill.price as i64 - avg_entry) * self.net_yes_position
                 } else {
-                    // Short position: unrealized = (cost_basis - current_price) * abs(position)
-                    (self.avg_cost_basis as i64 - fill.price as i64) * new_position.abs()
+                    // Short position: unrealized = (entry - current_price) * abs(position)
+                    (avg_entry - fill.price as i64) * self.net_yes_position.abs()
                 }
             } else {
                 0
             };
             
-            let total_pnl = new_realized_pnl + unrealized_pnl;
+            let total_pnl = self.realized_pnl + unrealized_pnl;
             
             // Update max profit/loss
             if total_pnl > self.max_profit {
@@ -1089,22 +1088,21 @@ impl PnlLoggingStrategy {
             
             // Log the PnL calculation in table format
             let side = if is_yes_order { "YES" } else { "NO" };
-            let action = if position_delta > 0 { "BUY" } else { "SELL" };
-            let trade_type = if !is_position_increasing && self.position != 0 { "ROUND-TRIP" } else { "POSITION" };
+            let action = if is_yes_order { "BUY" } else { "SELL" };
             
             // Print table header only once (on first fill)
-            if self.position == 0 && position_delta > 0 {
+            if self.net_yes_position == fill.qty && is_yes_order {
                 let _ = writeln!(log, "{:>13} | {:>6} | {:>5} | {:>5} | {:>12} | {:>10} | {:>8} | {:>10} | {:>8} | {:>8}",
-                    "TS", "SIDE", "PRICE", "QTY", "POSITION", "COST_BASIS", "REALIZED", "UNREALIZED", "TOTAL", "MAX_P/L");
+                    "TS", "SIDE", "PRICE", "QTY", "POSITION", "CASH_FLOW", "REALIZED", "UNREALIZED", "TOTAL", "MAX_P/L");
                 let _ = writeln!(log, "{:-<13}-+-{:-<6}-+-{:-<5}-+-{:-<5}-+-{:-<12}-+-{:-<10}-+-{:-<8}-+-{:-<10}-+-{:-<8}-+-{:-<8}",
                     "", "", "", "", "", "", "", "", "", "");
             }
             
             let _ = writeln!(log, "{:>13} | {:>6} | {:>5} | {:>5} | {:>12} | {:>10} | {:>8} | {:>10} | {:>8} | {:>8}",
                 fill.ts, format!("{}{}", side, action), format!("{}¢", fill.price), fill.qty, 
-                format!("{}->{}", old_position, new_position),
-                format!("{:.1}¢", self.avg_cost_basis),
-                format!("{}¢", new_realized_pnl),
+                format!("{}->{}", old_position, self.net_yes_position),
+                format!("{}¢", self.total_cash_flow),
+                format!("{}¢", self.realized_pnl),
                 format!("{}¢", unrealized_pnl),
                 format!("{}¢", total_pnl),
                 format!("{}/{}", self.max_profit, self.max_loss));
@@ -1113,7 +1111,7 @@ impl PnlLoggingStrategy {
     }
 
     fn calculate_final_settlement(&self) -> i64 {
-        if self.position == 0 {
+        if self.net_yes_position == 0 {
             return 0;
         }
         
@@ -1122,27 +1120,27 @@ impl PnlLoggingStrategy {
         // In practice, this would come from the actual market resolution
         let market_resolved_to_yes = true; // Assume YES resolution for now
         
-        let settlement_pnl = if self.position > 0 {
+        let settlement_value = if self.net_yes_position > 0 {
             // We have a long YES position
             if market_resolved_to_yes {
-                // YES wins: we get 100¢ per contract, minus what we paid
-                (100 - self.avg_cost_basis as i64) * self.position
+                // YES wins: we get 100¢ per contract
+                100 * self.net_yes_position
             } else {
-                // NO wins: we get 0¢ per contract, minus what we paid
-                (0 - self.avg_cost_basis as i64) * self.position
+                // NO wins: we get 0¢ per contract
+                0
             }
         } else {
             // We have a short YES position (equivalent to long NO position)
             if market_resolved_to_yes {
-                // YES wins: we owe 100¢ per contract, plus what we received
-                (self.avg_cost_basis as i64 - 100) * self.position.abs()
+                // YES wins: we owe 100¢ per contract
+                -100 * self.net_yes_position.abs()
             } else {
-                // NO wins: we owe 0¢ per contract, plus what we received
-                (self.avg_cost_basis as i64 - 0) * self.position.abs()
+                // NO wins: we owe 0¢ per contract
+                0
             }
         };
         
-        settlement_pnl
+        settlement_value
     }
 }
 
@@ -1162,55 +1160,8 @@ impl KalshiStrategy for PnlLoggingStrategy {
         // - If price >= 50¢, this was likely a NO order (buying NO)
         let is_yes_order = fill.price < 50;
         
-        // Calculate position change:
-        // - YES order: increases our YES position
-        // - NO order: decreases our YES position (equivalent to selling YES)
-        let position_delta = if is_yes_order {
-            fill.qty  // Buying YES increases YES position
-        } else {
-            -fill.qty // Buying NO decreases YES position (selling YES)
-        };
-        
-        let is_position_increasing = (self.position * position_delta) >= 0;
-        
         // Log PnL calculation before updating position
-        self.log_pnl_update(fill, position_delta, is_position_increasing, is_yes_order);
-        
-        // Update position tracking
-        if is_position_increasing {
-            // Position is growing, update cost basis
-            let new_cost = fill.price as i64 * fill.qty.abs();
-            self.total_cost += new_cost;
-            self.position += position_delta;
-            
-            if self.position != 0 {
-                self.avg_cost_basis = self.total_cost as f64 / self.position.abs() as f64;
-            }
-        } else {
-            // Position is reducing (round-trip)
-            let round_trip_pnl = if self.position > 0 {
-                // We had a long YES position, now selling YES
-                (fill.price as i64 - self.avg_cost_basis as i64) * fill.qty.abs()
-            } else {
-                // We had a short YES position, now buying YES
-                (self.avg_cost_basis as i64 - fill.price as i64) * fill.qty.abs()
-            };
-            
-            self.realized_pnl += round_trip_pnl;
-            
-            // Update cost basis by removing the portion we just closed
-            let closed_qty = fill.qty.abs();
-            self.total_cost -= self.avg_cost_basis as i64 * closed_qty;
-            self.position += position_delta;
-            
-            // Recalculate cost basis if we still have position
-            if self.position != 0 && self.total_cost > 0 {
-                self.avg_cost_basis = self.total_cost as f64 / self.position.abs() as f64;
-            } else if self.position == 0 {
-                self.avg_cost_basis = 0.0;
-                self.total_cost = 0;
-            }
-        }
+        self.log_pnl_update(fill, is_yes_order);
         
         // Forward to inner strategy
         self.inner.on_fill(fill);
