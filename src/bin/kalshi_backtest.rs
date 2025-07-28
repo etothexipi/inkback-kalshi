@@ -139,6 +139,12 @@ fn main() -> Result<()> {
                 .help("Enable debug logging to kalshi_debug.log with chronological event details")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("pnl-log")
+                .long("pnl-log")
+                .help("Enable PnL logging to kalshi_pnl.log with step-by-step PnL calculations")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let data_dir = matches.get_one::<String>("data").unwrap();
@@ -155,6 +161,7 @@ fn main() -> Result<()> {
     let all_markets = matches.get_flag("all-markets");
     let summary_only = matches.get_flag("summary-only");
     let debug_log = matches.get_flag("debug-log");
+    let pnl_log = matches.get_flag("pnl-log");
 
     // Verify data directory exists
     if !Path::new(data_dir).exists() {
@@ -269,6 +276,7 @@ fn main() -> Result<()> {
             qty,
             max_pos,
             debug_log,
+            pnl_log,
         );
 
         match result {
@@ -508,6 +516,7 @@ fn run_backtest_for_market(
     qty: i64,
     max_pos: i64,
     debug_log: bool,
+    pnl_log: bool,
 ) -> Result<InkBack::kalshi_types::Report> {
     // Create filtered CSV files for this specific market
     let temp_orderbook = create_filtered_csv(orderbook_path, market_ticker, "orderbook")?;
@@ -524,12 +533,14 @@ fn run_backtest_for_market(
             min_spread,
             qty,
             max_pos,
+            debug_log,
+            pnl_log,
         )
     } else {
         let backtest = KalshiBacktest::new(config.clone());
         
         // Create strategy based on user input
-        match strategy_type {
+        let mut strategy: Box<dyn KalshiStrategy> = match strategy_type {
         "spread_mm" => {
             let params = SpreadMmParams {
                 min_spread,
@@ -537,8 +548,7 @@ fn run_backtest_for_market(
                 max_position: max_pos,
                 order_ttl: Duration::from_secs(5),
             };
-            let mut strategy = SpreadMmStrategy::new(params);
-            backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)
+            Box::new(SpreadMmStrategy::new(params))
         }
         "trailing_spread_mm" => {
             let params = TrailingMmParams {
@@ -549,20 +559,37 @@ fn run_backtest_for_market(
                 order_ttl: Duration::from_secs(3),
                 min_move_for_replace: 1,
             };
-            let mut strategy = TrailingMmStrategy::new(params);
-            backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)
+            Box::new(TrailingMmStrategy::new(params))
         }
         "directional_yes" => {
-            let mut strategy = DirectionalStrategy::new(Side::Yes, qty, 60);
-            backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)
+            Box::new(DirectionalStrategy::new(Side::Yes, qty, 60))
         }
         "directional_no" => {
-            let mut strategy = DirectionalStrategy::new(Side::No, qty, 40);
-            backtest.run_from_files(&temp_orderbook, &temp_trades, &mut strategy)
+            Box::new(DirectionalStrategy::new(Side::No, qty, 40))
         }
         _ => {
             anyhow::bail!("Unknown strategy: {}. Use spread_mm, trailing_spread_mm, directional_yes, or directional_no", strategy_type);
         }
+        };
+
+        // Wrap strategy with PnL logging if enabled
+        if pnl_log {
+            let pnl_log_file = std::fs::File::create("kalshi_pnl.log")?;
+            let pnl_writer = Rc::new(RefCell::new(pnl_log_file));
+            
+            // Write header to PnL log
+            {
+                let mut log = pnl_writer.borrow_mut();
+                writeln!(log, "=== KALSHI PnL LOG ===")?;
+                writeln!(log, "Market: {}", market_ticker)?;
+                writeln!(log, "Strategy: {}", strategy_type)?;
+                writeln!(log, "Step-by-step PnL calculations...\n")?;
+            }
+            
+            let mut pnl_logging_strategy = PnlLoggingStrategy::new(strategy, pnl_writer);
+            backtest.run_from_files(&temp_orderbook, &temp_trades, &mut pnl_logging_strategy)
+        } else {
+            backtest.run_from_files(&temp_orderbook, &temp_trades, &mut *strategy)
         }
     };
 
@@ -713,6 +740,8 @@ fn run_backtest_with_debug_logging(
     min_spread: u8,
     qty: i64,
     max_pos: i64,
+    debug_log: bool,
+    pnl_log: bool,
 ) -> Result<Report> {
     println!("📝 Debug logging enabled - writing to kalshi_debug.log");
     
@@ -795,20 +824,68 @@ fn run_backtest_with_debug_logging(
     });
     
     // Create logging wrapper for strategy
-    let mut logging_strategy = LoggingStrategy::new(strategy, log_writer);
+    let mut logging_strategy: Box<dyn KalshiStrategy> = if pnl_log {
+        // PnL logging enabled (debug logging is always enabled in this function)
+        let pnl_log_file = std::fs::File::create("kalshi_pnl.log")?;
+        let pnl_writer = Rc::new(RefCell::new(pnl_log_file));
+        
+        // Write header to PnL log
+        {
+            let mut log = pnl_writer.borrow_mut();
+            writeln!(log, "=== KALSHI PnL LOG ===")?;
+            writeln!(log, "Market: {}", market_ticker)?;
+            writeln!(log, "Strategy: {}", strategy_type)?;
+            writeln!(log, "Step-by-step PnL calculations...\n")?;
+        }
+        
+        // Create PnL logging wrapper around the debug logging wrapper
+        let debug_wrapper = LoggingStrategy::new(strategy, log_writer);
+        Box::new(PnlLoggingStrategy::new(Box::new(debug_wrapper), pnl_writer))
+    } else {
+        // Only debug logging enabled (no PnL logging)
+        Box::new(LoggingStrategy::new(strategy, log_writer))
+    };
     
     // Run the backtest
-    let result = run_backtest(config.clone(), &mut logging_strategy, logged_events)?;
+    let result = run_backtest(config.clone(), &mut *logging_strategy, logged_events)?;
     
     // Write summary to log
-    {
-        let mut log = logging_strategy.log_writer.borrow_mut();
-        writeln!(log, "\n=== BACKTEST SUMMARY ===")?;
-        writeln!(log, "Total orders: {}", result.metrics.total_orders)?;
-        writeln!(log, "Total fills: {}", result.metrics.total_fills)?;
-        writeln!(log, "Cancelled orders: {}", result.metrics.cancelled_orders)?;
-        writeln!(log, "Expired orders: {}", result.metrics.expired_orders)?;
-        writeln!(log, "\nDebug log complete.")?;
+    if pnl_log {
+        // Both PnL and debug logging enabled
+        if let Some(pnl_wrapper) = logging_strategy.as_any().downcast_mut::<PnlLoggingStrategy>() {
+            // Write PnL summary
+            if let Ok(mut log) = pnl_wrapper.pnl_writer.try_borrow_mut() {
+                writeln!(log, "\n=== PnL SUMMARY ===")?;
+                writeln!(log, "Final Position: {}", pnl_wrapper.position)?;
+                writeln!(log, "Final Cost Basis: {:.2}¢", pnl_wrapper.avg_cost_basis)?;
+                writeln!(log, "Realized PnL: {}¢", pnl_wrapper.realized_pnl)?;
+                writeln!(log, "Max Profit: {}¢", pnl_wrapper.max_profit)?;
+                writeln!(log, "Max Loss: {}¢", pnl_wrapper.max_loss)?;
+                writeln!(log, "\nPnL log complete.")?;
+            }
+            
+            // Write debug summary to the inner debug wrapper
+            if let Some(debug_strategy) = pnl_wrapper.inner.as_any().downcast_mut::<LoggingStrategy>() {
+                let mut log = debug_strategy.log_writer.borrow_mut();
+                writeln!(log, "\n=== BACKTEST SUMMARY ===")?;
+                writeln!(log, "Total orders: {}", result.metrics.total_orders)?;
+                writeln!(log, "Total fills: {}", result.metrics.total_fills)?;
+                writeln!(log, "Cancelled orders: {}", result.metrics.cancelled_orders)?;
+                writeln!(log, "Expired orders: {}", result.metrics.expired_orders)?;
+                writeln!(log, "\nDebug log complete.")?;
+            }
+        }
+    } else {
+        // Only debug logging enabled (no PnL logging)
+        if let Some(debug_strategy) = logging_strategy.as_any().downcast_mut::<LoggingStrategy>() {
+            let mut log = debug_strategy.log_writer.borrow_mut();
+            writeln!(log, "\n=== BACKTEST SUMMARY ===")?;
+            writeln!(log, "Total orders: {}", result.metrics.total_orders)?;
+            writeln!(log, "Total fills: {}", result.metrics.total_fills)?;
+            writeln!(log, "Cancelled orders: {}", result.metrics.cancelled_orders)?;
+            writeln!(log, "Expired orders: {}", result.metrics.expired_orders)?;
+            writeln!(log, "\nDebug log complete.")?;
+        }
     }
     
     Ok(result)
@@ -882,6 +959,171 @@ impl KalshiStrategy for LoggingStrategy {
             let _ = log.flush();
         }
         
+        // Forward to inner strategy
+        self.inner.on_orders_created(order_mappings);
+    }
+
+    fn as_any(&mut self) -> &mut dyn std::any::Any {
+        self.inner.as_any()
+    }
+} 
+
+/// Wrapper strategy that logs PnL calculations step by step
+struct PnlLoggingStrategy {
+    inner: Box<dyn KalshiStrategy>,
+    pnl_writer: Rc<RefCell<std::fs::File>>,
+    // Track position and cost basis for PnL calculations
+    position: i64,
+    total_cost: i64,
+    avg_cost_basis: f64,
+    realized_pnl: i64,
+    max_profit: i64,
+    max_loss: i64,
+}
+
+impl PnlLoggingStrategy {
+    fn new(strategy: Box<dyn KalshiStrategy>, pnl_writer: Rc<RefCell<std::fs::File>>) -> Self {
+        Self {
+            inner: strategy,
+            pnl_writer,
+            position: 0,
+            total_cost: 0,
+            avg_cost_basis: 0.0,
+            realized_pnl: 0,
+            max_profit: 0,
+            max_loss: 0,
+        }
+    }
+
+    fn log_pnl_update(&mut self, fill: &Fill, position_delta: i64, is_position_increasing: bool) {
+        if let Ok(mut log) = self.pnl_writer.try_borrow_mut() {
+            let old_position = self.position;
+            let old_cost_basis = self.avg_cost_basis;
+            let old_realized_pnl = self.realized_pnl;
+            
+            // Calculate new position
+            let new_position = self.position + position_delta;
+            
+            // Calculate PnL impact
+            let pnl_impact = if !is_position_increasing && self.position != 0 {
+                // This is a round-trip trade (reducing position)
+                let round_trip_pnl = if self.position > 0 {
+                    // Long position being reduced: PnL = (exit_price - cost_basis) * qty
+                    (fill.price as i64 - self.avg_cost_basis as i64) * position_delta.abs()
+                } else {
+                    // Short position being reduced: PnL = (cost_basis - exit_price) * qty
+                    (self.avg_cost_basis as i64 - fill.price as i64) * position_delta.abs()
+                };
+                round_trip_pnl
+            } else {
+                0
+            };
+            
+            let new_realized_pnl = self.realized_pnl + pnl_impact;
+            
+            // Calculate unrealized PnL at current market price (using fill price as proxy)
+            let unrealized_pnl = if new_position != 0 {
+                if new_position > 0 {
+                    // Long position: unrealized = (current_price - cost_basis) * position
+                    (fill.price as i64 - self.avg_cost_basis as i64) * new_position
+                } else {
+                    // Short position: unrealized = (cost_basis - current_price) * abs(position)
+                    (self.avg_cost_basis as i64 - fill.price as i64) * new_position.abs()
+                }
+            } else {
+                0
+            };
+            
+            let total_pnl = new_realized_pnl + unrealized_pnl;
+            
+            // Update max profit/loss
+            if total_pnl > self.max_profit {
+                self.max_profit = total_pnl;
+            }
+            if total_pnl < self.max_loss {
+                self.max_loss = total_pnl;
+            }
+            
+            // Log the PnL calculation
+            let _ = writeln!(log, "FILL_PNL: ts={}, order_id={}, price={}¢, qty={}, side={}",
+                fill.ts, fill.id, fill.price, fill.qty, 
+                if position_delta > 0 { "BUY" } else { "SELL" });
+            let _ = writeln!(log, "  Position: {} -> {} (delta: {})", 
+                old_position, new_position, position_delta);
+            let _ = writeln!(log, "  Cost Basis: {:.2}¢ -> {:.2}¢", 
+                old_cost_basis, self.avg_cost_basis);
+            let _ = writeln!(log, "  Realized PnL: {}¢ -> {}¢ (impact: {}¢)", 
+                old_realized_pnl, new_realized_pnl, pnl_impact);
+            let _ = writeln!(log, "  Unrealized PnL: {}¢", unrealized_pnl);
+            let _ = writeln!(log, "  Total PnL: {}¢ (Max Profit: {}¢, Max Loss: {}¢)", 
+                total_pnl, self.max_profit, self.max_loss);
+            let _ = writeln!(log, "");
+            let _ = log.flush();
+        }
+    }
+}
+
+impl KalshiStrategy for PnlLoggingStrategy {
+    fn on_book(&mut self, md: &MarketData) -> Vec<OrderInstr> {
+        // Forward to inner strategy
+        self.inner.on_book(md)
+    }
+
+    fn on_fill(&mut self, fill: &Fill) {
+        // Determine position change based on fill price
+        // This is a simplified approach - in practice you'd track order sides
+        let position_delta = if fill.price < 50 {
+            // Likely a YES buy (increases YES position)
+            fill.qty
+        } else {
+            // Likely a NO buy (decreases YES position)
+            -fill.qty
+        };
+        
+        let is_position_increasing = (self.position * position_delta) >= 0;
+        
+        // Log PnL calculation before updating position
+        self.log_pnl_update(fill, position_delta, is_position_increasing);
+        
+        // Update position tracking
+        if is_position_increasing {
+            // Position is growing, update cost basis
+            let new_cost = fill.price as i64 * fill.qty.abs();
+            self.total_cost += new_cost;
+            self.position += position_delta;
+            
+            if self.position != 0 {
+                self.avg_cost_basis = self.total_cost as f64 / self.position.abs() as f64;
+            }
+        } else {
+            // Position is reducing (round-trip)
+            let round_trip_pnl = if self.position > 0 {
+                (fill.price as i64 - self.avg_cost_basis as i64) * fill.qty.abs()
+            } else {
+                (self.avg_cost_basis as i64 - fill.price as i64) * fill.qty.abs()
+            };
+            
+            self.realized_pnl += round_trip_pnl;
+            
+            // Update cost basis by removing the portion we just closed
+            let closed_qty = fill.qty.abs();
+            self.total_cost -= self.avg_cost_basis as i64 * closed_qty;
+            self.position += position_delta;
+            
+            // Recalculate cost basis if we still have position
+            if self.position != 0 && self.total_cost > 0 {
+                self.avg_cost_basis = self.total_cost as f64 / self.position.abs() as f64;
+            } else if self.position == 0 {
+                self.avg_cost_basis = 0.0;
+                self.total_cost = 0;
+            }
+        }
+        
+        // Forward to inner strategy
+        self.inner.on_fill(fill);
+    }
+
+    fn on_orders_created(&mut self, order_mappings: Vec<(usize, OrderId)>) {
         // Forward to inner strategy
         self.inner.on_orders_created(order_mappings);
     }
