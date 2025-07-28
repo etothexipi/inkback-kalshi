@@ -1094,13 +1094,13 @@ impl PnlLoggingStrategy {
             
             // Print table header only once (on first fill)
             if self.position == 0 && position_delta > 0 {
-                let _ = writeln!(log, "{:>8} | {:>6} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8}",
+                let _ = writeln!(log, "{:>13} | {:>6} | {:>5} | {:>5} | {:>12} | {:>10} | {:>8} | {:>10} | {:>8} | {:>8}",
                     "TS", "SIDE", "PRICE", "QTY", "POSITION", "COST_BASIS", "REALIZED", "UNREALIZED", "TOTAL", "MAX_P/L");
-                let _ = writeln!(log, "{:-<8}-+-{:-<6}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}-+-{:-<8}",
+                let _ = writeln!(log, "{:-<13}-+-{:-<6}-+-{:-<5}-+-{:-<5}-+-{:-<12}-+-{:-<10}-+-{:-<8}-+-{:-<10}-+-{:-<8}-+-{:-<8}",
                     "", "", "", "", "", "", "", "", "", "");
             }
             
-            let _ = writeln!(log, "{:>8} | {:>6} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8} | {:>8}",
+            let _ = writeln!(log, "{:>13} | {:>6} | {:>5} | {:>5} | {:>12} | {:>10} | {:>8} | {:>10} | {:>8} | {:>8}",
                 fill.ts, format!("{}{}", side, action), format!("{}¢", fill.price), fill.qty, 
                 format!("{}->{}", old_position, new_position),
                 format!("{:.1}¢", self.avg_cost_basis),
