@@ -611,6 +611,41 @@ fn run_backtest_for_market(
                 writeln!(log, "Total Final PnL: {}¢", pnl_logging_strategy.realized_pnl + settlement_pnl)?;
                 writeln!(log, "Max Profit: {}¢", pnl_logging_strategy.max_profit)?;
                 writeln!(log, "Max Loss: {}¢", pnl_logging_strategy.max_loss)?;
+                
+                // Log settlement resolution decision
+                match (pnl_logging_strategy.last_bid, pnl_logging_strategy.last_ask) {
+                    (Some(bid), Some(ask)) => {
+                        writeln!(log, "Last Bid: {}¢, Last Ask: {}¢", bid, ask)?;
+                        if bid > 90 {
+                            writeln!(log, "Resolution: YES (bid > 90¢)")?;
+                        } else if ask < 10 {
+                            writeln!(log, "Resolution: NO (ask < 10¢)")?;
+                        } else {
+                            writeln!(log, "Resolution: YES (neutral case, bid > ask)")?;
+                        }
+                    }
+                    (Some(bid), None) => {
+                        writeln!(log, "Last Bid: {}¢, Last Ask: N/A", bid)?;
+                        if bid > 90 {
+                            writeln!(log, "Resolution: YES (bid > 90¢)")?;
+                        } else {
+                            writeln!(log, "Resolution: NO (bid <= 90¢)")?;
+                        }
+                    }
+                    (None, Some(ask)) => {
+                        writeln!(log, "Last Bid: N/A, Last Ask: {}¢", ask)?;
+                        if ask < 10 {
+                            writeln!(log, "Resolution: NO (ask < 10¢)")?;
+                        } else {
+                            writeln!(log, "Resolution: YES (ask >= 10¢)")?;
+                        }
+                    }
+                    (None, None) => {
+                        writeln!(log, "Last Bid: N/A, Last Ask: N/A")?;
+                        writeln!(log, "Resolution: YES (default - no market data)")?;
+                    }
+                }
+                
                 writeln!(log, "\nPnL log complete.")?;
             }
             
@@ -904,6 +939,41 @@ fn run_backtest_with_debug_logging(
                 writeln!(log, "Total Final PnL: {}¢", pnl_wrapper.realized_pnl + settlement_pnl)?;
                 writeln!(log, "Max Profit: {}¢", pnl_wrapper.max_profit)?;
                 writeln!(log, "Max Loss: {}¢", pnl_wrapper.max_loss)?;
+                
+                // Log settlement resolution decision
+                match (pnl_wrapper.last_bid, pnl_wrapper.last_ask) {
+                    (Some(bid), Some(ask)) => {
+                        writeln!(log, "Last Bid: {}¢, Last Ask: {}¢", bid, ask)?;
+                        if bid > 90 {
+                            writeln!(log, "Resolution: YES (bid > 90¢)")?;
+                        } else if ask < 10 {
+                            writeln!(log, "Resolution: NO (ask < 10¢)")?;
+                        } else {
+                            writeln!(log, "Resolution: YES (neutral case, bid > ask)")?;
+                        }
+                    }
+                    (Some(bid), None) => {
+                        writeln!(log, "Last Bid: {}¢, Last Ask: N/A", bid)?;
+                        if bid > 90 {
+                            writeln!(log, "Resolution: YES (bid > 90¢)")?;
+                        } else {
+                            writeln!(log, "Resolution: NO (bid <= 90¢)")?;
+                        }
+                    }
+                    (None, Some(ask)) => {
+                        writeln!(log, "Last Bid: N/A, Last Ask: {}¢", ask)?;
+                        if ask < 10 {
+                            writeln!(log, "Resolution: NO (ask < 10¢)")?;
+                        } else {
+                            writeln!(log, "Resolution: YES (ask >= 10¢)")?;
+                        }
+                    }
+                    (None, None) => {
+                        writeln!(log, "Last Bid: N/A, Last Ask: N/A")?;
+                        writeln!(log, "Resolution: YES (default - no market data)")?;
+                    }
+                }
+                
                 writeln!(log, "\nPnL log complete.")?;
             }
             
@@ -1021,6 +1091,9 @@ struct PnlLoggingStrategy {
     realized_pnl: i64,          // Realized PnL from completed round trips
     max_profit: i64,
     max_loss: i64,
+    // Track last bid/ask for settlement resolution
+    last_bid: Option<u8>,
+    last_ask: Option<u8>,
 }
 
 impl PnlLoggingStrategy {
@@ -1033,6 +1106,8 @@ impl PnlLoggingStrategy {
             realized_pnl: 0,
             max_profit: 0,
             max_loss: 0,
+            last_bid: None,
+            last_ask: None,
         }
     }
 
@@ -1115,10 +1190,40 @@ impl PnlLoggingStrategy {
             return 0;
         }
         
-        // Determine market resolution based on final orderbook state
-        // For this example, we'll assume YES resolution (98¢) based on the debug log
-        // In practice, this would come from the actual market resolution
-        let market_resolved_to_yes = true; // Assume YES resolution for now
+        // Determine market resolution based on last bid/ask prices
+        // If last bid > 90¢, assume YES resolution
+        // If last ask < 10¢, assume NO resolution
+        // Otherwise, use a neutral assumption (50¢)
+        let market_resolved_to_yes = match (self.last_bid, self.last_ask) {
+            (Some(bid), Some(ask)) => {
+                if bid > 90 {
+                    true  // High bid suggests YES will win
+                } else if ask < 10 {
+                    false // Low ask suggests NO will win
+                } else {
+                    // Neutral case - could be improved with more sophisticated logic
+                    bid > ask  // If bid > ask, slightly favor YES
+                }
+            }
+            (Some(bid), None) => {
+                if bid > 90 {
+                    true
+                } else {
+                    false
+                }
+            }
+            (None, Some(ask)) => {
+                if ask < 10 {
+                    false
+                } else {
+                    true
+                }
+            }
+            (None, None) => {
+                // No market data available, default to neutral
+                true
+            }
+        };
         
         let settlement_value = if self.net_yes_position > 0 {
             // We have a long YES position
@@ -1146,6 +1251,10 @@ impl PnlLoggingStrategy {
 
 impl KalshiStrategy for PnlLoggingStrategy {
     fn on_book(&mut self, md: &MarketData) -> Vec<OrderInstr> {
+        // Track last bid/ask prices for settlement resolution
+        self.last_bid = Some(md.bid);
+        self.last_ask = Some(md.ask);
+        
         // Forward to inner strategy
         self.inner.on_book(md)
     }
