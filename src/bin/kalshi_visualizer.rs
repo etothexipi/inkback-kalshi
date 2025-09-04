@@ -155,7 +155,7 @@ fn main() -> Result<()> {
     }
 
     // Launch the visualization
-    println!("\n🚀 Launching orderbook visualizer...");
+    println!("\n🚀 Generating interactive HTML visualization...");
     InkBack::kalshi_viz::run_visualizer(viz_data)?;
 
     Ok(())
