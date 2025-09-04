@@ -12,7 +12,7 @@ use openssl::rsa::Rsa;
 use openssl::hash::MessageDigest;
 use openssl::pkey::PKey;
 use openssl::sign::Signer;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 /// Sign Kalshi API request using RSA PSS SHA256
 fn sign_request(private_key_pem: &str, message: &str) -> Result<String> {
@@ -161,8 +161,14 @@ pub async fn collect_ws_data(api_key: &str, private_key_path: &str, market_input
         return Err(anyhow!("no markets found for input '{}'", market_input));
     }
 
-    // Create output directory if it doesn't exist
-    create_dir_all(output_dir)?;
+    collect_ws_data_with_tickers(api_key, private_key_path, &tickers, output_dir).await
+}
+
+/// Collect orderbook deltas and trades for a given list of tickers and write to CSV files
+pub async fn collect_ws_data_with_tickers(api_key: &str, private_key_path: &str, tickers: &[String], output_dir: &str) -> Result<()> {
+    if tickers.is_empty() {
+        return Err(anyhow!("no markets provided"));
+    }
 
     let path = "/trade-api/ws/v2";
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
