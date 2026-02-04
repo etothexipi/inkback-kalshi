@@ -1,158 +1,342 @@
-High‑Level, Repo‑Agnostic Back‑test Specification
-(Design target: Rust ≥ 1.74, async‑runtime optional but recommended)
+Kalshi Backtest Simulator — Implementation Spec (InkBack repo)
+=============================================================
 
-1. Terminology & Core Assumptions
-Term	Meaning
-Snapshot row	msg_type == snapshot; gives full depth (§2.2).
-Delta row	msg_type == delta; single price‑level change.
-Trade row	Executed trade (from Trades CSV).
-Global seq	seq is monotone across all markets. Process events strictly in ascending seq then client_ts.
-YES / NO	Each MLB contract has two order books (YES, NO); treat them as one L2 book with bids = YES levels, asks = NO levels.
-Latency (ms)	Configurable delay between event‑arrival and our order hitting the book.
-Maker‑only	All strategy orders are passively resting; no fees.
+This document specifies the *actual* Kalshi backtest simulator implementation in this repository.
+It is written to answer: “how do we build the L2 book from deltas/snapshots, how do we use public
+trades to simulate fills, and what exactly is the per-event simulation loop?”
 
-2. Modules & Public Interfaces
-rust
-Copy
-crate
-├── csv_io
-│   ├── parse_orderbook(path) -> impl Iterator<Item=RawObRow>
-│   └── parse_trades(path)     -> impl Iterator<Item=RawTradeRow>
-├── event_stream
-│   └── merge(obs, trades) -> impl Iterator<Item=Event>         // §3
-├── l2_book
-│   ├── OrderBook::apply_snapshot(...)
-│   ├── OrderBook::apply_delta(...)
-│   └── OrderBook::best_bid_ask() -> (u8, u8)                  // cents
-├── strategy
-│   └── trait Strategy { fn on_book(&mut self, md: &MarketData) -> Vec<OrderInstr>; fn on_fill(&mut self, fill: &Fill); }
-├── exec_sim
-│   └── Engine::run(cfg, strategy, events) -> Report           // §4–§6
-└── types.rs   // Event, MarketData, OrderInstr, ActiveOrder, Fill, Report
-3. Event Construction
-rust
-Copy
-enum Event {
-    Snapshot { seq: u64, ts: u64, ticker: String, yes_levels: Vec<(u8, i64)>, no_levels: Vec<(u8, i64)> },
-    Delta    { seq: u64, ts: u64, ticker: String, side: Side, price: u8, delta: i64 },
-    Trade    { seq: u64, ts: u64, ticker: String, yes_price: u8, no_price: u8, qty: i64, taker: Side },
-}
-Implementation rule:
+Non-goals
+- This spec does **not** document how CSVs are downloaded or produced; assume orderbook + trades
+  tables already exist.
+- This spec describes the current behavior, including implementation quirks, so results can be
+  interpreted correctly.
 
-Parse both CSVs line‑by‑line.
 
-Group consecutive snapshot rows having identical (seq, ticker) into one Snapshot event.
+## 1) Core concepts & invariants
 
-Convert trade rows 1‑for‑1 into Trade events.
+### 1.1 Event types (unified stream)
+Source: `src/kalshi_types.rs`
 
-Heap‑merge the two iterators by (seq, ts) ascending to yield a unified stream.
+The simulator consumes a unified iterator of:
 
-4. Execution Simulator (exec_sim::Engine)
-State:
+- `Snapshot { seq, ts, ticker, yes_levels, no_levels }`
+- `Delta { seq, ts, ticker, side, price, delta }`
+- `Trade { seq, ts, ticker, yes_price, no_price, qty, taker }`
 
-rust
-Copy
-struct SimState {
-    books: HashMap<String, OrderBook>,
-    pending: BinaryHeap<PendingOrder>,   // ordered by activation_time
-    active: HashMap<OrderId, ActiveOrder>,
-    latency: Duration,
-    metrics: Metrics,
-}
-Loop (for ev in events):
+Notes
+- `ts` is treated as an opaque `u64` timestamp. The engine adds latency/TTL using **milliseconds**
+  (`Duration::as_millis()`), so in practice your `ts` must be in *milliseconds* for latency/TTL to
+  be meaningful.
+- The CLI (`src/bin/kalshi_backtest.rs`) filters to **one market per run** by writing temporary
+  per-ticker CSVs. The execution engine does not attach a ticker to orders.
 
-Activate Orders
+### 1.2 Side semantics (YES-centric)
+Source: `src/kalshi_types.rs`, `src/kalshi_l2_book.rs`, `src/kalshi_exec_sim.rs`
 
-rust
-Copy
-while let Some(p) = pending.peek() if p.activation_time <= ev.ts {
-    active.insert(p.id, p.into_active());
-}
-Apply Market Event
+The backtester uses a YES-centric convention:
 
-Lookup OrderBook for ev.ticker; create on first sight.
+- `Side::Yes` orders: **buy YES** (bid for YES), price is YES price in cents.
+- `Side::No` orders: **sell YES** (ask for YES), price is YES price in cents.
 
-Snapshot → apply_snapshot; Delta → apply_delta.
+Public trades can be reported as either a YES-taker or NO-taker trade. The simulator converts a
+NO-taker trade into an “effective YES price” (see §6.2).
 
-If Trade, record for debug and evaluate fills (step 4).
 
-Feed Strategy
+## 2) Building the unified event stream
 
-rust
-Copy
-let md = MarketData { ts: ev.ts, ticker: ev.ticker.clone(), bid, ask /* from book */ };
-for instr in strategy.on_book(&md) {
-    match instr {
-        OrderInstr::Limit { side, price, qty, ttl } => create_pending(side, price, qty, ttl),
-        OrderInstr::Cancel { id }                   => cancel_if_active(id),
-    }
-}
-Fill Logic (on Trade)
-For each ActiveOrder at trade.price opposite trade.taker:
+Source: `src/kalshi_csv_io.rs`, `src/kalshi_event_stream.rs`
 
-pgsql
-Copy
-fill_qty = min(order.remaining, trade.qty_left)
-generate Fill { id, price, qty=fill_qty, ts=ev.ts }
-if order.remaining == 0 => remove from active
-trade.qty_left -= fill_qty
-metrics.update(fill)
-strategy.on_fill(&fill)
-Stop when trade.qty_left == 0.
+### 2.1 Parsing (high level)
+- Orderbook rows are parsed into `RawObRow`.
+  - `msg_type` must be `"snapshot"` or `"delta"`.
+  - Delta rows must include: `side`, `price`, `quantity` (used as `delta`).
+- Trades rows are parsed into `RawTradeRow` (1 row → 1 trade event).
 
-Expire Orders
-After processing event, remove any ActiveOrder whose expiry_time <= ev.ts and notify strategy (treated as cancel).
+Important: The simulator’s *execution logic* is independent of the CSV format as long as the final
+event stream matches the `Event` enum. The details above are included only to define the semantics
+of “snapshot vs delta” and “delta is additive”.
 
-5. Strategy‑Side API
-rust
-Copy
-enum OrderInstr {
-    Limit  { side: Side, price: u8, qty: i64, ttl: Duration }, // ttl = order_expiration_secs
-    Cancel { id: OrderId },
-}
-A minimal spread‑capture strategy can live in strategy::spread_mm and be parameterised by:
+### 2.2 Snapshot grouping and buffering
+Source: `src/kalshi_event_stream.rs`
 
-rust
-Copy
-struct Params {
-    min_spread: u8,       // cents
-    post_qty:    i64,
-    max_pos:     i64,
-    order_ttl:   Duration,
-}
-6. Metrics & Report
-Capture at minimum:
+Orderbook snapshot rows are buffered by `(seq, ticker)`:
 
-Field	Description
-gross_pnl_cents	Sum((sell_price - buy_price) * qty) over matched pairs.
-num_spreads	Count of completed round‑trips.
-volume_traded	Σ qty filled (both sides).
-win_rate	num_round_trips_positive / total_round_trips.
-roi	gross_pnl / max(abs(net_position_cost)) if needed.
+- When a row with `msg_type == "snapshot"` is read, it is appended to an in-memory buffer:
+  `snapshot_buffer[(seq, ticker)] -> Vec<RawObRow>`.
 
-Engine::run() returns Report { metrics, fills: Vec<Fill>, orders: Vec<OrderAudit> }.
+- When a row with `msg_type == "delta"` is read:
+  - **All** buffered snapshots for **all tickers** are flushed into `Snapshot` events (one per
+    `(seq, ticker)`), then the delta row is converted into a `Delta` event.
 
-7. CLI Skeleton (optional)
-bash
-Copy
-cargo run -- backtest \
-    --orderbook data/orderbooks.csv \
-    --trades    data/trades.csv \
-    --contract  KXMLBGAME-25JUL22SDMIA-SD \
-    --latency-ms 5 \
-    --min-spread 4 \
-    --qty 50 \
-    --max-pos 100 \
-    --ttl-sec 5
-Implementation Notes
-Global sequence: Verify strictly increasing seq; abort on gap or regress (data‑quality guard).
+At end-of-stream, any remaining buffered snapshots are flushed.
 
-Performance: Stream‑process files; avoid loading whole CSV if memory‑constrained.
+Snapshot event creation detail (important)
+- When a snapshot group is flushed, the merger builds the `Snapshot.yes_levels` / `Snapshot.no_levels`
+  vectors by collecting rows that have `side`, `price`, and `quantity` populated.
+- The current implementation does **not** consume `RawObRow.yes_levels` / `RawObRow.no_levels`
+  aggregated fields when building the `Snapshot` event.
+  - Practically: “aggregated snapshot rows” (single row containing `yes_levels` / `no_levels`) will
+    currently flush into a `Snapshot` event with **empty** levels.
 
-Threading: Single‑thread OK (deterministic). If multi‑threading, gate event loop with a channel feeding workers per‑market.
+### 2.3 Event ordering (what the merger actually yields)
+Source: `src/kalshi_event_stream.rs`
 
-Extensibility: You can plug alternative strategies by implementing the Strategy trait.
+Events are pushed into a min-heap ordered by:
 
-No external Kalshi dependencies: All execution is local; HTTP/WebSocket code paths are unused in backtest.
+1. `ts` ascending
+2. `seq` ascending (tie-breaker)
 
-This spec is intentionally concise yet complete enough for engineers to build a deterministic, maker‑only, limit‑order back‑tester in Rust without assuming any particular project layout.
+The iterator repeatedly:
+- reads at most one orderbook row + one trade row,
+- pushes resulting events into the heap,
+- then pops and yields the earliest `(ts, seq)` event from the heap.
+
+Important consequence
+- Snapshot events are not yielded until they are flushed (on first delta or end-of-stream). This
+  means early trade events can be yielded before an earlier snapshot if no delta has been seen yet.
+  This is current behavior and should be accounted for when interpreting results.
+
+
+## 3) In-memory L2 order book “cache”
+
+Source: `src/kalshi_l2_book.rs`, stored in `Engine.state.books` in `src/kalshi_exec_sim.rs`
+
+### 3.1 Data structure
+For each `ticker`, the engine stores an `OrderBook`:
+
+- `yes_levels: BTreeMap<u8, i64>`  // YES price (cents) → quantity
+- `no_levels:  BTreeMap<u8, i64>`  // NO price (cents)  → quantity (stored raw)
+
+BTreeMap is used so levels are always sorted by price. “Best” levels are retrieved by iterating
+from the end (`.iter().rev().next()`).
+
+### 3.2 Applying snapshots
+Source: `OrderBook::apply_snapshot`
+
+On a snapshot:
+- clear both maps
+- insert every `(price, qty)` where `qty > 0` into the corresponding map
+- set `last_update_ts = ts`
+
+### 3.3 Applying deltas (additive updates)
+Source: `OrderBook::apply_delta`
+
+On a delta `(side, price, delta)`:
+- `current_qty = levels.get(price).unwrap_or(0)`
+- `new_qty = current_qty + delta`
+- if `new_qty <= 0`: remove the price level
+- else: set price level to `new_qty`
+- set `last_update_ts = ts`
+
+### 3.4 Bid/ask calculation (YES-centric)
+Source: `OrderBook::best_bid_ask`
+
+Best bid (YES):
+- `bid = max(yes_levels.keys())`, else 0 if empty
+
+Best ask (YES):
+- NO levels are stored as **raw NO prices**, but for YES-ask we invert:
+  - take `max(no_levels.keys())` (highest NO price)
+  - invert: `ask_yes = 100 - no_price`
+  - else 100 if empty
+
+Example
+- If the best NO price is 55, the YES ask is `100 - 55 = 45`.
+
+Trades do not mutate the book
+Source: `update_book_with_event`
+- `Trade` events do **not** update the `OrderBook`. Book state is driven only by snapshots/deltas.
+
+
+## 4) Execution engine overview
+
+Source: `src/kalshi_exec_sim.rs`
+
+### 4.1 Engine state
+The engine maintains:
+- `books: HashMap<String, OrderBook>`                         // L2 book cache, per ticker
+- `pending: BinaryHeap<Reverse<PendingOrderWrapper>>`         // orders waiting for activation
+- `active: HashMap<OrderId, ActiveOrder>`                     // orders eligible to be filled
+- `metrics: Metrics`
+- `order_audit: Vec<OrderAudit>`                              // full lifecycle audit trail
+- `order_id_counter: OrderId`                                 // engine-assigned IDs
+
+### 4.2 Config gating (time window)
+Source: `Engine::run`
+
+For each event:
+- if `end_time` is set and `event.ts > end_time`: stop the simulation loop
+- if `event.ts < start_time`: skip the event entirely (book is not updated, no fills, no strategy)
+
+This means the engine can start with empty book state if the initial snapshot occurs before
+`start_time`.
+
+
+## 5) Per-event simulation loop (exact order)
+
+Source: `Engine::process_event`
+
+For each processed event `event`:
+
+1. Activate pending orders at `event_ts`
+   - Move any pending order with `activation_time <= event_ts` into `active`.
+
+2. Apply the market event to the order book
+   - `book = books[ticker]` (created on first sight)
+   - Snapshot → `apply_snapshot`
+   - Delta    → `apply_delta`
+   - Trade    → no book change
+
+3. If the event is a trade, process fills (see §6)
+
+4. Feed the strategy with the current top-of-book
+   - Read `(bid, ask)` from the updated book (default `(0, 100)` if missing).
+   - Call `strategy.on_book(&MarketData { ts, ticker, bid, ask })`.
+   - Process the returned `Vec<OrderInstr>`:
+     - `Limit`: create a pending order, add audit record
+       - `activation_time = current_ts + latency_ms`
+       - `expiry_time     = activation_time + ttl_ms`
+       - TTL is measured from **activation**, not from creation time.
+     - `Cancel`: remove from active if present; otherwise search pending heap and remove
+   - After processing, call `strategy.on_orders_created(mappings)` where `mappings` maps
+     `(instruction_index -> engine_order_id)` for all `Limit` instructions.
+
+5. Expire orders at `event_ts`
+   - Remove any *active* order with `expiry_time <= event_ts`.
+   - Note: the engine does not currently notify the strategy of expirations.
+
+
+## 6) Fill simulation (public-trade-driven)
+
+Source: `Engine::process_trade_fills` and `Engine::process_side_fills`
+
+### 6.1 Key modeling assumptions
+- Maker-only: the engine only simulates **resting** limit orders.
+- Orders are **not** inserted into the `OrderBook`. The historical book is treated as exogenous.
+- Queue position is not modeled.
+- Fills are driven solely by public `Trade` events and a “trade-through” rule (below).
+
+### 6.2 Convert a trade into a YES-price trigger
+Trade events include both `yes_price` and `no_price`, and the `taker` side.
+
+The engine derives a YES-price for fill comparisons:
+
+- If `taker == Side::Yes`:
+  - someone bought YES at `yes_price`
+  - `trade_yes_price = yes_price`
+  - this trade can fill our `Side::No` orders (selling YES)
+
+- If `taker == Side::No`:
+  - someone bought NO at `no_price`
+  - convert to YES-price: `trade_yes_price = 100 - no_price`
+  - this trade can fill our `Side::Yes` orders (buying YES)
+
+### 6.3 Eligibility (“trade-through”)
+Given `trade_yes_price` and a target fill side:
+
+- For `Side::No` orders (selling YES):
+  - eligible if `order.price <= trade_yes_price`
+
+- For `Side::Yes` orders (buying YES):
+  - eligible if `order.price >= trade_yes_price`
+
+All eligible orders share the same trade quantity budget `qty_remaining` from that trade event.
+
+### 6.4 Allocation & priority (deterministic)
+Eligible active orders are copied into a list and sorted before filling:
+
+- For `Side::No` orders:
+  - sort by `order.price` **descending** (higher prices first), then by `order_id` ascending
+
+- For `Side::Yes` orders:
+  - sort by `order.price` **ascending** (lower prices first), then by `order_id` ascending
+
+Then iterate in that order:
+- `fill_qty = min(qty_remaining, order.remaining)`
+- `fill_price = order.price`  (fills are recorded at the order’s limit price)
+- emit `Fill { id, price, qty, ts, side }` to `strategy.on_fill(&fill)`
+- decrement `order.remaining` and `qty_remaining`
+- update `OrderAudit` status and filled quantity
+- stop when `qty_remaining == 0`
+
+### 6.5 What ends up in the final `Report.fills`
+Source: `Engine::extract_fills_from_audit`
+
+The engine currently does **not** persist per-fill records during the run.
+Instead, it derives `Report.fills` from `OrderAudit`:
+- one `Fill` per order with `filled_qty > 0`
+- `Fill.ts` is approximated as `audit.activation_time` (not the actual trade timestamp)
+
+Strategies still receive real-time fill callbacks with the actual trade `ts`.
+
+
+## 7) Settlement / market outcome (assumed external dataset)
+
+User requirement: final market outcome comes from a separate dataset.
+
+Design intent
+- The simulator should settle any remaining net position using an explicit market outcome record,
+  keyed by `ticker`.
+- This removes the need for heuristics that try to infer resolution from the final orderbook.
+
+Recommended outcome record (example)
+- `ticker: String`
+- `settlement_yes_cents: u8`  // typically 0 or 100
+- `settled_ts: u64` (optional)
+
+Settlement math (YES-centric)
+- Maintain:
+  - `net_yes_position` (positive = long YES, negative = short YES)
+  - `total_cash_flow_cents` where:
+    - buying YES: `cash -= price * qty`
+    - selling YES: `cash += price * qty`
+- At settlement:
+  - `payout = net_yes_position * settlement_yes_cents`
+    (if net is negative, payout is negative, representing what you owe)
+  - `final_pnl = total_cash_flow_cents + payout`
+
+Current code behavior (to be replaced)
+- `Engine` contains a `determine_market_resolution(book)` heuristic based on final bid
+  (e.g., bid >= 99 → resolve “YES”), and downcasts specific strategies to call their
+  `settle_final_position(...)`.
+- This is explicitly not the desired long-term design; the spec assumes an external outcome feed.
+
+
+## 8) Outputs
+
+Source: `src/kalshi_types.rs`
+
+The engine returns `Report { metrics, fills, orders }`:
+- `metrics`: counts and placeholder PnL fields
+- `orders`: full order audit trail (Created → Active → PartiallyFilled/Filled/Cancelled/Expired)
+- `fills`: currently derived from audits (see §6.5)
+
+
+## 9) Determinism
+Within a single run (single market):
+- Event ordering is deterministic given the same input iterators.
+- Fill allocation is deterministic due to explicit sorting and order ID tie-breakers.
+
+
+## 10) Known limitations / implementation quirks
+
+These are not “shoulds”; they are behaviors/constraints of the current implementation that affect
+interpretation and extension.
+
+- **Strategies only see top-of-book**: `MarketData` passed into `KalshiStrategy::on_book()` contains
+  only `(bid, ask)` (best prices). Full depth is stored in the engine’s `OrderBook` cache but is not
+  exposed through the strategy trait.
+
+- **Single-market assumption in execution**: order instructions (`OrderInstr`) do not include a
+  `ticker`. The CLI avoids cross-market contamination by filtering each run to a single market.
+
+- **Snapshot buffering can delay snapshots**: snapshots are held until a delta or end-of-stream;
+  trades can be processed before an earlier snapshot if no delta has been seen yet.
+
+- **Fill priority is not exchange matching priority**: for eligible orders, the engine prioritizes
+  `Side::No` fills by higher price first and `Side::Yes` fills by lower price first. This is a
+  deterministic rule but is not a Kalshi matching-engine emulation.
+
+- **Report fills lose per-trade timing**: `Report.fills` is derived from `OrderAudit` and uses
+  `activation_time` as an approximate fill timestamp; real-time strategy callbacks include the
+  actual trade timestamp.
