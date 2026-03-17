@@ -3,6 +3,14 @@ name = "InkBack"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "kalshi_backtest"
+path = "src/bin/kalshi_backtest.rs"
+
+[[bin]]
+name = "kalshi_visualizer"
+path = "src/bin/kalshi_visualizer.rs"
+
 [dependencies]
 databento = "0.8.0"
 time = "0.3"
@@ -12,5 +20,20 @@ dotenvy = "0.15"
 csv = "1.3"
 rayon = "1.8"
 serde = "1.0.219"
-iced = { version = "0.12", features = ["canvas", "tokio"] }
+plotly = "0.8"
 serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Kalshi integration
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+base64 = "0.21"
+rsa = "0.9"
+sha2 = "0.10"
+rand = "0.8"
+openssl = { version = "0.10" }
+clap = { version = "4.0", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.8"

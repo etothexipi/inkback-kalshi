@@ -15,10 +15,25 @@ mod backtester;
 mod plot;
 pub mod slippage_models;
 
+// Kalshi backtesting modules
+mod kalshi_types;
+mod kalshi_csv_io;
+mod kalshi_event_stream;
+mod kalshi_l2_book;
+mod kalshi_strategy;
+mod kalshi_exec_sim;
+mod kalshi_backtest;
+
 use plot::plot_equity_curves;
 use strategy::Strategy;
 use utils::fetch::fetch_and_save_csv;
 use crate::{slippage_models::TransactionCosts, strategy::{Candle, Order, OrderType, StrategyParams}};
+
+// Import Kalshi modules  
+use kalshi_backtest::{KalshiBacktest, calculate_performance_metrics};
+use kalshi_strategy::{KalshiStrategy, SpreadMmStrategy, SpreadMmParams, DirectionalStrategy};
+use kalshi_types::{SimConfig, Side};
+use std::time::Duration;
 
 // InkBack schemas
 pub enum InkBackSchema {
@@ -268,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
     // Load environment variables
     dotenvy::dotenv().ok();
 
+    // Original databento backtesting logic
     // Define historical data range
     let start = date!(2025 - 01 - 01).with_time(time!(00:00)).assume_utc();
     let end = date!(2025 - 06 - 01).with_time(time!(00:00)).assume_utc();
